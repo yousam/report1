@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>聚合运维监控</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f5f7fa; color: #333; min-height: 100vh; }
+  .header { background: #fff; border-bottom: 1px solid #e4e7ed; padding: 0 24px; height: 56px; display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 18px; font-weight: 600; color: #1a1a1a; }
+  .header a { font-size: 13px; color: #409eff; text-decoration: none; }
+  .container { max-width: 1800px; margin: 0 auto; padding: 20px; }
+  .card { background: #fff; border-radius: 8px; padding: 18px 20px; margin-bottom: 18px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+  .card h2 { font-size: 14px; font-weight: 600; color: #1a1a1a; margin-bottom: 14px; display: flex; align-items: center; gap: 10px; }
+  .card h2 .hint { font-size: 12px; font-weight: 400; color: #909399; }
+
+  table.cfg { width: 100%; border-collapse: collapse; }
+  table.cfg th { font-size: 12px; color: #909399; font-weight: 500; text-align: left; padding: 4px 8px; }
+  table.cfg td { padding: 4px 8px; }
+  table.cfg input { width: 100%; height: 32px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 13px; outline: none; }
+  table.cfg input:focus { border-color: #409eff; }
+  .col-name { width: 140px; } .col-url { width: 280px; } .col-mail { width: 200px; } .col-pwd { width: 150px; } .col-del { width: 40px; }
+
+  .btn { height: 34px; padding: 0 18px; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+  .btn-primary { background: #409eff; color: #fff; }
+  .btn-primary:hover { background: #337ecc; }
+  .btn-primary:disabled { background: #a0cfff; cursor: not-allowed; }
+  .btn-ghost { background: #fff; color: #606266; border: 1px solid #dcdfe6; }
+  .btn-ghost:hover { border-color: #409eff; color: #409eff; }
+  .btn-del { background: #fff; color: #f56c6c; border: 1px solid #fbc4c4; height: 30px; padding: 0 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .btn-del:hover { background: #fef0f0; }
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+
+  .thr-row { display: flex; gap: 18px; flex-wrap: wrap; }
+  .thr-item { display: flex; flex-direction: column; gap: 5px; }
+  .thr-item label { font-size: 12px; color: #606266; font-weight: 500; }
+  .thr-item input { width: 130px; height: 32px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 13px; outline: none; }
+
+  .auto-refresh { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #606266; margin-left: auto; }
+  .refresh-time { color: #909399; font-size: 12px; }
+  .err-banner { color: #f56c6c; font-size: 13px; margin-top: 10px; display: none; }
+
+  .result-wrap { overflow-x: auto; }
+  table.ops { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.ops th { background: #fafafa; color: #606266; font-weight: 600; padding: 9px 10px; text-align: right; border-bottom: 2px solid #ebeef5; position: sticky; top: 0; }
+  table.ops th.l, table.ops td.l { text-align: left; }
+  table.ops td { padding: 8px 10px; text-align: right; border-bottom: 1px solid #f0f2f5; }
+  table.ops tr:hover td { background: #f8fbff; }
+  table.ops td.name { font-weight: 600; color: #1a1a1a; }
+  table.ops td.sub { color: #909399; font-size: 11px; }
+  .row-error td { background: #fef0f0 !important; }
+  .cell-red { color: #f56c6c; font-weight: 600; }
+  .cell-yellow { color: #e6a23c; font-weight: 600; }
+  .cell-green { color: #67c23a; }
+  .cell-gray { color: #c0c4cc; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge.ok { background: #e7f7ee; color: #1f9550; }
+  .badge.down { background: #fef0f0; color: #f56c6c; }
+  .err-text { color: #f56c6c; font-weight: 500; text-align: left; white-space: normal; }
+  .muted { color: #c0c4cc; }
+
+  .name.expandable { cursor: pointer; user-select: none; }
+  .name.expandable:hover { color: #409eff; }
+  .caret { display: inline-block; width: 12px; color: #909399; font-size: 10px; transition: transform 0.15s; }
+  .caret.open { transform: rotate(90deg); color: #409eff; }
+  tr.detail-row td { background: #fbfcfe; padding: 0; border-bottom: 1px solid #ebeef5; }
+  .detail-wrap { padding: 16px 20px; }
+  .detail-loading { color: #909399; font-size: 13px; padding: 10px 0; }
+  .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }
+  .detail-panel { background: #fff; border: 1px solid #ebeef5; border-radius: 6px; padding: 12px 14px; }
+  .detail-panel h3 { font-size: 13px; font-weight: 600; color: #303133; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .detail-panel h3 .tag { font-size: 11px; font-weight: 400; color: #909399; }
+  table.dt { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.dt th { color: #909399; font-weight: 500; text-align: right; padding: 4px 8px; border-bottom: 1px solid #ebeef5; white-space: nowrap; }
+  table.dt th.l, table.dt td.l { text-align: left; }
+  table.dt td { padding: 4px 8px; text-align: right; border-bottom: 1px solid #f5f7fa; white-space: nowrap; }
+  table.dt td.wrap { white-space: normal; word-break: break-all; max-width: 320px; }
+  .detail-panel.full { grid-column: 1 / -1; }
+  .dt-scroll { max-height: 320px; overflow: auto; }
+  .panel-err { color: #f56c6c; font-size: 12px; }
+  .panel-empty { color: #c0c4cc; font-size: 12px; padding: 6px 0; }
+  .range-pick { margin-left: auto; font-weight: 400; }
+  .range-pick select { height: 26px; border: 1px solid #dcdfe6; border-radius: 5px; font-size: 12px; padding: 0 6px; }
+  .bar-cell { position: relative; }
+  .bar { display: inline-block; height: 8px; background: #c6e2ff; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>聚合运维监控</h1>
+    <a href="/settingsites">站点配置</a>
+    <a href="/financemodel">财务模型</a>
+    <a href="/usagerealtime">实时用量</a>
+    <a href="/usagecnusersearch">CN用量查询</a>
+  </div>
+  <div class="container">
+
+    <div class="card">
+      <h2>运维查询 <span class="hint">站点在 <a href="/settingsites">站点配置</a> 统一维护，这里聚合展示全部已配置站点</span></h2>
+      <div class="actions">
+        <select id="opsRange" class="ops-range" style="height:30px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;padding:0 8px;"><option value="5m">近5分钟</option><option value="30m">近30分钟</option><option value="1h" selected>近1小时</option><option value="6h">近6小时</option><option value="24h">近24小时</option></select>
+        <button class="btn btn-primary" id="queryBtn">查询</button>
+        <label class="auto-refresh"><input type="checkbox" id="autoRefresh" checked> 每30秒自动刷新</label>
+        <label class="auto-refresh" style="margin-left:0;"><input type="checkbox" id="soundAlarm" checked> 请求错误率&gt;<input type="number" id="alarmThr" value="1" step="0.1" min="0" style="width:54px;height:28px;padding:0 6px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;text-align:right;">% 声音报警</label>
+        <button class="btn btn-ghost" id="testSound" type="button" style="height:30px;padding:0 12px;">试听</button>
+        <label class="auto-refresh" style="margin-left:0;"><input type="checkbox" id="soundAlarmUp" checked> 上游错误率&gt;<input type="number" id="alarmThrUp" value="5" step="0.1" min="0" style="width:54px;height:28px;padding:0 6px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;text-align:right;">% 声音报警</label>
+        <button class="btn btn-ghost" id="testSoundUp" type="button" style="height:30px;padding:0 12px;">试听</button>
+        <span class="refresh-time" id="refreshTime"></span>
+      </div>
+      <div class="err-banner" id="errBanner"></div>
+    </div>
+
+    <div class="card">
+      <h2>统一阈值 <span class="hint">红=达到阈值；黄=达到阈值×0.8(SLA为阈值+1)；CPU/内存/健康分用固定阈值</span></h2>
+      <div class="thr-row">
+        <div class="thr-item"><label>SLA 最低% (低于变红)</label><input type="number" id="thrSla" step="0.1"></div>
+        <div class="thr-item"><label>TTFT P99 上限(ms)</label><input type="number" id="thrTtft" step="50"></div>
+        <div class="thr-item"><label>请求错误率上限%</label><input type="number" id="thrErr" step="0.1"></div>
+        <div class="thr-item"><label>上游错误率上限%</label><input type="number" id="thrUp" step="0.1"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>运维概览 <span class="hint" id="statHint"></span></h2>
+      <div class="result-wrap">
+        <table class="ops">
+          <thead>
+            <tr>
+              <th class="l">站点</th>
+              <th>Token</th>
+              <th>健康分</th><th>CPU%</th><th>内存%</th><th>DB</th><th>Redis</th>
+              <th>SLA%</th><th>QPS</th><th>TPS</th><th>请求错误数</th><th>请求数</th>
+              <th>请求错误%</th><th>上游错误%</th><th>TTFT P99</th>
+              <th>协程</th><th>账号切换</th><th>任务</th>
+              <th>并发排队</th>
+            </tr>
+          </thead>
+          <tbody id="opsBody">
+            <tr><td class="l muted" colspan="18">填入站点后点「查询」</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+<script>
+const LS_THR = "sub2report_ops_thresholds";
+const LS_SOUND = "sub2report_ops_sound";
+const DEFAULT_THR = { sla: 98, ttft: 5000, err: 3, up: 5 };
+const SLA_WARN_BUFFER = 1;
+const NCOLS = 19;
+
+let timer = null;
+
+// ---------- 声音报警 (Web Audio API 生成蜂鸣，需用户先点过页面才能播放) ----------
+let audioCtx = null;
+let lastAlarmAt = 0;
+let lastAlarmAtUp = 0;
+const ALARM_COOLDOWN_MS = 10000; // 10s 内不重复报警，避免每次刷新都响
+
+function ensureAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { return null; }
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+
+function beep(ctx, startAt, freq, durSec, type) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type || "square";
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(0.25, startAt + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + durSec);
+  osc.connect(gain); gain.connect(ctx.destination);
+  osc.start(startAt); osc.stop(startAt + durSec + 0.02);
+}
+
+function playAlarm() {
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  // 请求错误：三声急促高低蜂鸣（高音方波“叮咚叮”）
+  beep(ctx, t,        880, 0.18);
+  beep(ctx, t + 0.24, 660, 0.18);
+  beep(ctx, t + 0.48, 880, 0.22);
+}
+
+function playAlarmUp() {
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  // 上游错误：两声低沉长鸣（低音锯齿波“嗡—嗡”），与请求错误明显区分
+  beep(ctx, t,        330, 0.45, "sawtooth");
+  beep(ctx, t + 0.55, 247, 0.55, "sawtooth");
+}
+
+function maybeAlarm(stations) {
+  const list = stations || [];
+  const now = Date.now();
+
+  // 请求错误率报警（高音“叮咚叮”）
+  if (document.getElementById("soundAlarm").checked) {
+    const thr = parseFloat(document.getElementById("alarmThr").value);
+    if (thr >= 0) {
+      const hit = list.some(s =>
+        s && s.ok && s.metrics && s.metrics.error_rate_percent != null
+        && s.metrics.error_rate_percent > thr);
+      if (hit && now - lastAlarmAt >= ALARM_COOLDOWN_MS) {
+        lastAlarmAt = now;
+        playAlarm();
+      }
+    }
+  }
+
+  // 上游错误率报警（低沉“嗡—嗡”，独立开关/阈值/冷却）
+  if (document.getElementById("soundAlarmUp").checked) {
+    const thrUp = parseFloat(document.getElementById("alarmThrUp").value);
+    if (thrUp >= 0) {
+      const hitUp = list.some(s =>
+        s && s.ok && s.metrics && s.metrics.upstream_error_rate_percent != null
+        && s.metrics.upstream_error_rate_percent > thrUp);
+      if (hitUp && now - lastAlarmAtUp >= ALARM_COOLDOWN_MS) {
+        lastAlarmAtUp = now;
+        playAlarmUp();
+      }
+    }
+  }
+}
+
+function saveSound() {
+  localStorage.setItem(LS_SOUND, JSON.stringify({
+    on: document.getElementById("soundAlarm").checked,
+    thr: document.getElementById("alarmThr").value,
+    onUp: document.getElementById("soundAlarmUp").checked,
+    thrUp: document.getElementById("alarmThrUp").value,
+  }));
+}
+function loadSound() {
+  try {
+    const s = JSON.parse(localStorage.getItem(LS_SOUND) || "null");
+    if (s) {
+      document.getElementById("soundAlarm").checked = s.on !== false;
+      if (s.thr != null) document.getElementById("alarmThr").value = s.thr;
+      document.getElementById("soundAlarmUp").checked = s.onUp !== false;
+      if (s.thrUp != null) document.getElementById("alarmThrUp").value = s.thrUp;
+    }
+  } catch (e) {}
+}
+
+// ---------- 阈值 ----------
+function readThr() {
+  return {
+    sla: parseFloat(document.getElementById("thrSla").value) || 0,
+    ttft: parseFloat(document.getElementById("thrTtft").value) || 0,
+    err: parseFloat(document.getElementById("thrErr").value) || 0,
+    up: parseFloat(document.getElementById("thrUp").value) || 0,
+  };
+}
+function saveThr() { localStorage.setItem(LS_THR, JSON.stringify(readThr())); }
+function loadThr() {
+  let t = DEFAULT_THR;
+  try { const s = JSON.parse(localStorage.getItem(LS_THR) || "null"); if (s) t = s; } catch (e) {}
+  document.getElementById("thrSla").value = t.sla;
+  document.getElementById("thrTtft").value = t.ttft;
+  document.getElementById("thrErr").value = t.err;
+  document.getElementById("thrUp").value = t.up;
+}
+
+// ---------- 上色规则（对齐 sub2api OpsDashboardHeader） ----------
+function lvlSla(v, thr) {
+  if (v == null || !thr) return "";
+  if (v < thr) return "cell-red";
+  if (v < thr + SLA_WARN_BUFFER) return "cell-yellow";
+  return "cell-green";
+}
+function lvlMaxHigh(v, thr) { // 越高越坏：>=thr 红，>=thr*0.8 黄
+  if (v == null || !thr) return "";
+  if (v >= thr) return "cell-red";
+  if (v >= thr * 0.8) return "cell-yellow";
+  return "cell-green";
+}
+function lvlFixed(v, red, yellow) { // CPU/内存：>=red 红, >=yellow 黄
+  if (v == null) return "";
+  if (v >= red) return "cell-red";
+  if (v >= yellow) return "cell-yellow";
+  return "cell-green";
+}
+function lvlHealth(v, idle) {
+  if (idle) return "cell-gray";
+  if (v == null) return "cell-gray";
+  if (v >= 90) return "cell-green";
+  if (v >= 60) return "cell-yellow";
+  return "cell-red";
+}
+
+// ---------- 渲染辅助 ----------
+function fmtNum(v, d) {
+  if (v == null) return '<span class="muted">-</span>';
+  if (d != null) return Number(v).toFixed(d);
+  return Number(v).toLocaleString();
+}
+function fmtInt(v) { return v == null ? '<span class="muted">-</span>' : Number(v).toLocaleString(); }
+function cell(html, cls) { return '<td class="' + (cls || "") + '">' + html + '</td>'; }
+
+function renderRows(stations, thr) {
+  const body = document.getElementById("opsBody");
+  if (!stations || !stations.length) {
+    body.innerHTML = '<tr><td class="l muted" colspan="' + NCOLS + '">无数据</td></tr>';
+    return;
+  }
+  body.innerHTML = "";
+  stations.forEach((st, idx) => {
+    const tr = document.createElement("tr");
+    const rowId = "st-" + idx;
+    const canExpand = st.ok && st.base_url;
+    const nameCell = '<td class="l name' + (canExpand ? ' expandable' : '') + '"' +
+      (canExpand ? ' data-row="' + rowId + '" title="点击展开明细"' : '') + '>' +
+      (canExpand ? '<span class="caret" id="caret-' + rowId + '">▶</span> ' : '') +
+      escapeHtml(st.name || st.base_url || "?") +
+      '<div class="sub">' + escapeHtml(st.base_url || "") + '</div></td>';
+
+    if (!st.ok) {
+      tr.className = "row-error";
+      tr.innerHTML = nameCell +
+        '<td class="err-text" colspan="' + (NCOLS - 1) + '">⚠ ' + escapeHtml(st.error || "查询失败") + '</td>';
+      body.appendChild(tr);
+      return;
+    }
+
+    const m = st.metrics || {};
+    const dbConn = (m.db_conn_active != null || m.db_conn_idle != null)
+      ? '活跃' + (m.db_conn_active == null ? '-' : m.db_conn_active) +
+        '/空闲' + (m.db_conn_idle == null ? '-' : m.db_conn_idle) +
+        (m.db_conn_waiting ? '/等待' + m.db_conn_waiting : '') +
+        (m.db_max_open_conns ? '/上限' + m.db_max_open_conns : '')
+      : '';
+    const redisConn = (m.redis_conn_total != null || m.redis_conn_idle != null)
+      ? '连接' + (m.redis_conn_total == null ? '-' : m.redis_conn_total) +
+        '/空闲' + (m.redis_conn_idle == null ? '-' : m.redis_conn_idle) +
+        (m.redis_pool_size ? '/池' + m.redis_pool_size : '')
+      : '';
+    const dbBadge = (m.db_ok === false ? '<span class="badge down">宕</span>' :
+      (m.db_ok === true ? '<span class="badge ok">正常</span>' : '<span class="muted">-</span>')) +
+      (dbConn ? '<div class="sub">' + dbConn + '</div>' : '');
+    const redisBadge = (m.redis_ok === false ? '<span class="badge down">宕</span>' :
+      (m.redis_ok === true ? '<span class="badge ok">正常</span>' : '<span class="muted">-</span>')) +
+      (redisConn ? '<div class="sub">' + redisConn + '</div>' : '');
+
+    let memHtml = '<span class="muted">-</span>';
+    if (m.memory_usage_percent != null) {
+      memHtml = fmtNum(m.memory_usage_percent, 1);
+      if (m.memory_used_mb != null && m.memory_total_mb != null) {
+        memHtml += '<div class="sub">' + fmtInt(m.memory_used_mb) + '/' + fmtInt(m.memory_total_mb) + 'MB</div>';
+      }
+    }
+
+    let jobHtml = '<span class="muted">-</span>';
+    if (m.job_total) {
+      if (m.job_failed > 0) {
+        const names = (m.job_failed_names || []).join(", ");
+        jobHtml = '<span class="cell-red">' + m.job_failed + '/' + m.job_total + ' 失败</span>' +
+          (names ? '<div class="sub">' + escapeHtml(names) + '</div>' : '');
+      } else {
+        jobHtml = '<span class="cell-green">' + m.job_total + ' 正常</span>';
+      }
+    }
+
+    const upTotal = (m.upstream_error_count_excl_429_529 == null ? null :
+      m.upstream_error_count_excl_429_529);
+    let upHtml = fmtNum(m.upstream_error_rate_percent, 2);
+    if (m.upstream_error_rate_percent != null) upHtml += "%";
+
+    tr.innerHTML =
+      nameCell +
+      cell(fmtInt(m.token_consumed)) +
+      cell(fmtNum(m.health_score, 0), lvlHealth(m.health_score, m.idle)) +
+      cell(m.cpu_usage_percent == null ? '<span class="muted">-</span>' : fmtNum(m.cpu_usage_percent, 1), lvlFixed(m.cpu_usage_percent, 95, 80)) +
+      cell(memHtml, lvlFixed(m.memory_usage_percent, 95, 85)) +
+      cell(dbBadge) +
+      cell(redisBadge) +
+      cell(m.sla_percent == null ? '<span class="muted">-</span>' : fmtNum(m.sla_percent, 2) + "%", lvlSla(m.sla_percent, thr.sla)) +
+      cell(fmtNum(m.qps_current, 2)) +
+      cell(fmtNum(m.tps_current, 0)) +
+      cell(fmtInt(m.error_count_total)) +
+      cell(fmtInt(m.request_count_total)) +
+      cell(m.error_rate_percent == null ? '<span class="muted">-</span>' : fmtNum(m.error_rate_percent, 2) + "%", lvlMaxHigh(m.error_rate_percent, thr.err)) +
+      cell(m.upstream_error_rate_percent == null ? '<span class="muted">-</span>' : upHtml, lvlMaxHigh(m.upstream_error_rate_percent, thr.up)) +
+      cell(m.ttft_p99_ms == null ? '<span class="muted">-</span>' : fmtInt(m.ttft_p99_ms) + "ms", lvlMaxHigh(m.ttft_p99_ms, thr.ttft)) +
+      cell(fmtInt(m.goroutine_count)) +
+      cell(fmtInt(m.account_switch_count)) +
+      cell(jobHtml) +
+      cell(fmtInt(m.concurrency_queue_depth), (m.concurrency_queue_depth && m.concurrency_queue_depth > 0) ? "cell-yellow" : "");
+    body.appendChild(tr);
+
+    if (canExpand) {
+      tr.querySelector(".expandable").onclick = () => toggleDetail(rowId, st, tr);
+      if (openDetails[rowId]) {
+        const caret = tr.querySelector(".caret");
+        if (caret) caret.classList.add("open");
+        const dr = document.createElement("tr");
+        dr.className = "detail-row";
+        dr.id = "detail-" + rowId;
+        dr.innerHTML = '<td colspan="' + NCOLS + '"><div class="detail-wrap" id="dw-' + rowId +
+          '"><div class="detail-loading">加载明细中…</div></div></td>';
+        tr.after(dr);
+        loadDetail(rowId, st);  // 用 JS 端缓存，30s 自动刷新不会重复打站
+      }
+    }
+  });
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// ---------- 明细展开（点击站点行才拉取，默认 1h 窗口） ----------
+const LS_DETAIL_RANGE = "sub2report_ops_detail_range";
+const openDetails = {};   // rowId -> true（展开状态，刷新后保持）
+const detailCache = {};   // rowId -> { range, data }（避免重复点击重复打站）
+
+function getDetailRange() {
+  return localStorage.getItem(LS_DETAIL_RANGE) || "1h";
+}
+function setDetailRange(v) { localStorage.setItem(LS_DETAIL_RANGE, v); }
+
+function toggleDetail(rowId, st, tr) {
+  const existing = document.getElementById("detail-" + rowId);
+  const caret = document.getElementById("caret-" + rowId);
+  if (existing) {
+    existing.remove();
+    if (caret) caret.classList.remove("open");
+    delete openDetails[rowId];
+    return;
+  }
+  openDetails[rowId] = true;
+  if (caret) caret.classList.add("open");
+  const dr = document.createElement("tr");
+  dr.className = "detail-row";
+  dr.id = "detail-" + rowId;
+  dr.innerHTML = '<td colspan="' + NCOLS + '"><div class="detail-wrap" id="dw-' + rowId +
+    '"><div class="detail-loading">加载明细中…</div></div></td>';
+  tr.after(dr);
+  loadDetail(rowId, st);
+}
+
+async function loadDetail(rowId, st, force) {
+  const range = getDetailRange();
+  const wrap = document.getElementById("dw-" + rowId);
+  if (!wrap) return;
+  const cached = detailCache[rowId];
+  if (cached && cached.range === range && !force) {
+    wrap.innerHTML = renderDetail(cached.data, range, rowId);
+    bindRangePick(rowId, st);
+    return;
+  }
+  wrap.innerHTML = '<div class="detail-loading">加载明细中…（' + range + '）</div>';
+  try {
+    const resp = await fetch("/api/ops-detail", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: st.name, time_range: range }),
+    });
+    const data = await resp.json();
+    if (data.error || !data.ok) {
+      wrap.innerHTML = '<div class="panel-err">明细加载失败: ' +
+        escapeHtml(data.error || (data.detail ? "" : "未知错误")) + '</div>';
+      return;
+    }
+    detailCache[rowId] = { range, data: data.detail };
+    wrap.innerHTML = renderDetail(data.detail, range, rowId);
+    bindRangePick(rowId, st);
+  } catch (e) {
+    wrap.innerHTML = '<div class="panel-err">明细请求失败: ' + escapeHtml(String(e)) + '</div>';
+  }
+}
+
+function bindRangePick(rowId, st) {
+  const sel = document.getElementById("range-" + rowId);
+  if (sel) sel.onchange = () => { setDetailRange(sel.value); loadDetail(rowId, st, true); };
+}
+
+function panelErr(detail, key) {
+  const e = (detail.errors || {})[key];
+  return e ? '<div class="panel-err">' + escapeHtml(e) + '</div>' : '';
+}
+function emptyOr(rows, html) {
+  return (rows && rows.length) ? html : '<div class="panel-empty">无数据</div>';
+}
+
+function renderDetail(detail, range, rowId) {
+  const ranges = ["1h", "6h", "24h"];
+  const picker = '<span class="range-pick">窗口 <select id="range-' + rowId + '">' +
+    ranges.map(r => '<option value="' + r + '"' + (r === range ? ' selected' : '') + '>' +
+      ({ "1h": "最近1小时", "6h": "最近6小时", "24h": "最近24小时" }[r]) + '</option>').join("") +
+    '</select></span>';
+
+  // 按平台并发/排队
+  const conc = detail.concurrency || [];
+  const concRows = conc.map(c =>
+    '<tr><td class="l">' + escapeHtml(c.platform || "-") + '</td>' +
+    '<td>' + fmtInt(c.current_in_use) + '</td>' +
+    '<td>' + fmtInt(c.max_capacity) + '</td>' +
+    '<td>' + (c.load_percentage == null ? '-' : fmtNum(c.load_percentage, 1) + '%') + '</td>' +
+    '<td class="' + ((c.waiting_in_queue || 0) > 0 ? 'cell-yellow' : '') + '">' + fmtInt(c.waiting_in_queue) + '</td></tr>'
+  ).join("");
+  const concPanel = '<div class="detail-panel"><h3>按平台并发/排队</h3>' + panelErr(detail, "concurrency") +
+    emptyOr(conc, '<div class="dt-scroll"><table class="dt"><thead><tr><th class="l">平台</th><th>使用中</th><th>容量</th><th>负载</th><th>排队</th></tr></thead><tbody>' +
+      concRows + '</tbody></table></div>') + '</div>';
+
+  // 按平台吞吐
+  const thr = detail.throughput || [];
+  const maxReq = Math.max(1, ...thr.map(t => t.request_count || 0));
+  const thrRows = thr.map(t =>
+    '<tr><td class="l">' + escapeHtml(t.platform || "-") + '</td>' +
+    '<td class="l bar-cell"><span class="bar" style="width:' + Math.round(60 * (t.request_count || 0) / maxReq) + 'px"></span>' + fmtInt(t.request_count) + '</td>' +
+    '<td>' + fmtInt(t.token_consumed) + '</td></tr>'
+  ).join("");
+  const thrPanel = '<div class="detail-panel"><h3>按平台吞吐 <span class="tag">' + range + '</span></h3>' + panelErr(detail, "throughput") +
+    emptyOr(thr, '<div class="dt-scroll"><table class="dt"><thead><tr><th class="l">平台</th><th class="l">请求数</th><th>Token</th></tr></thead><tbody>' +
+      thrRows + '</tbody></table></div>') + '</div>';
+
+  // 请求时长分布
+  const lat = detail.latency || [];
+  const maxLat = Math.max(1, ...lat.map(b => b.count || 0));
+  const latRows = lat.map(b =>
+    '<tr><td class="l">' + escapeHtml(b.range || "-") + '</td>' +
+    '<td class="l bar-cell"><span class="bar" style="width:' + Math.round(80 * (b.count || 0) / maxLat) + 'px"></span>' + fmtInt(b.count) + '</td></tr>'
+  ).join("");
+  const latPanel = '<div class="detail-panel"><h3>请求时长分布 <span class="tag">' + range + '</span></h3>' + panelErr(detail, "latency") +
+    emptyOr(lat, '<table class="dt"><thead><tr><th class="l">区间</th><th class="l">请求数</th></tr></thead><tbody>' +
+      latRows + '</tbody></table>') + '</div>';
+
+  // 错误分布
+  const ed = detail.error_distribution || [];
+  const edRows = ed.map(e =>
+    '<tr><td class="l">' + fmtInt(e.status_code) + '</td>' +
+    '<td>' + fmtInt(e.total) + '</td>' +
+    '<td>' + fmtInt(e.sla) + '</td>' +
+    '<td>' + fmtInt(e.business_limited) + '</td></tr>'
+  ).join("");
+  const edPanel = '<div class="detail-panel"><h3>错误分布(按状态码) <span class="tag">' + range + '</span></h3>' + panelErr(detail, "error_distribution") +
+    emptyOr(ed, '<div class="dt-scroll"><table class="dt"><thead><tr><th class="l">状态码</th><th>总数</th><th>计入SLA</th><th>业务限流</th></tr></thead><tbody>' +
+      edRows + '</tbody></table></div>') + '</div>';
+
+  // 请求错误明细 Top20
+  const reqErrPanel = errTablePanel("请求错误明细 Top20", detail.request_errors, range, panelErr(detail, "request_errors"));
+  // 上游错误明细 Top20
+  const upErrPanel = errTablePanel("上游错误明细 Top20", detail.upstream_errors, range, panelErr(detail, "upstream_errors"));
+
+  return '<div style="display:flex;align-items:center;margin-bottom:10px;font-size:13px;color:#606266;">明细数据' + picker + '</div>' +
+    '<div class="detail-grid">' + concPanel + thrPanel + latPanel + edPanel + '</div>' +
+    '<div style="height:16px"></div>' + reqErrPanel +
+    '<div style="height:16px"></div>' + upErrPanel;
+}
+
+function fmtTime(s) {
+  if (!s) return '-';
+  return String(s).replace("T", " ").replace(/\.\d+/, "").replace("Z", "").slice(0, 19);
+}
+
+function errTablePanel(title, rows, range, errHtml) {
+  rows = rows || [];
+  const body = rows.map(r =>
+    '<tr>' +
+    '<td class="l">' + fmtTime(r.created_at) + '</td>' +
+    '<td class="' + ((r.status_code || 0) >= 500 ? 'cell-red' : (r.status_code >= 400 ? 'cell-yellow' : '')) + '">' + fmtInt(r.status_code) + '</td>' +
+    '<td class="l">' + escapeHtml(r.phase || "-") + '</td>' +
+    '<td class="l">' + escapeHtml(r.platform || "-") + '</td>' +
+    '<td class="l">' + escapeHtml(r.model || "-") + '</td>' +
+    '<td class="l">' + escapeHtml(r.account_name || "-") + '</td>' +
+    '<td class="l">' + escapeHtml(r.user_email || "-") + '</td>' +
+    '<td class="l wrap">' + escapeHtml(r.message || "-") + '</td>' +
+    '</tr>'
+  ).join("");
+  const table = '<div class="dt-scroll"><table class="dt"><thead><tr>' +
+    '<th class="l">时间</th><th>状态</th><th class="l">阶段</th><th class="l">平台</th><th class="l">模型</th>' +
+    '<th class="l">账号</th><th class="l">用户</th><th class="l">错误信息</th></tr></thead><tbody>' +
+    body + '</tbody></table></div>';
+  return '<div class="detail-panel full"><h3>' + title + ' <span class="tag">' + range + '</span></h3>' +
+    errHtml + emptyOr(rows, table) + '</div>';
+}
+
+// ---------- 查询 ----------
+let querying = false;
+const LS_OPS_RANGE = "sub2report_ops_range";
+function getOpsRange() {
+  const sel = document.getElementById("opsRange");
+  return (sel && sel.value) || localStorage.getItem(LS_OPS_RANGE) || "1h";
+}
+function initOpsRange() {
+  const sel = document.getElementById("opsRange");
+  if (!sel) return;
+  const saved = localStorage.getItem(LS_OPS_RANGE);
+  if (saved) sel.value = saved;
+  sel.onchange = () => { localStorage.setItem(LS_OPS_RANGE, sel.value); doQuery(); };
+}
+async function doQuery() {
+  if (querying) return;
+  const errBanner = document.getElementById("errBanner");
+  errBanner.style.display = "none";
+
+  querying = true;
+  const btn = document.getElementById("queryBtn");
+  btn.disabled = true; btn.textContent = "查询中…";
+  try {
+    const resp = await fetch("/api/ops-aggregate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ time_range: getOpsRange() }),
+    });
+    const data = await resp.json();
+    if (data.error) { errBanner.textContent = data.error; errBanner.style.display = "block"; }
+    else {
+      renderRows(data.stations, readThr());
+      maybeAlarm(data.stations);
+      const okN = data.stations.filter(s => s.ok).length;
+      const failN = data.stations.length - okN;
+      document.getElementById("statHint").textContent =
+        "共 " + data.stations.length + " 站，正常 " + okN + (failN ? "，异常 " + failN : "");
+      document.getElementById("refreshTime").textContent = "更新于 " + (data.server_time || "").replace("T", " ");
+    }
+  } catch (e) {
+    errBanner.textContent = "请求失败: " + e; errBanner.style.display = "block";
+  } finally {
+    querying = false;
+    btn.disabled = false; btn.textContent = "查询";
+  }
+}
+
+function setupAutoRefresh() {
+  if (timer) { clearInterval(timer); timer = null; }
+  if (document.getElementById("autoRefresh").checked) {
+    timer = setInterval(doQuery, 30000);
+  }
+}
+
+// ---------- init ----------
+loadThr();
+loadSound();
+document.getElementById("queryBtn").onclick = doQuery;
+initOpsRange();
+document.getElementById("autoRefresh").onchange = setupAutoRefresh;
+document.getElementById("testSound").onclick = () => { ensureAudio(); playAlarm(); };
+document.getElementById("soundAlarm").onchange = saveSound;
+document.getElementById("alarmThr").addEventListener("change", saveSound);
+document.getElementById("testSoundUp").onclick = () => { ensureAudio(); playAlarmUp(); };
+document.getElementById("soundAlarmUp").onchange = saveSound;
+document.getElementById("alarmThrUp").addEventListener("change", saveSound);
+["thrSla","thrTtft","thrErr","thrUp"].forEach(id =>
+  document.getElementById(id).addEventListener("change", saveThr));
+setupAutoRefresh();
+doQuery();
+</script>
+</body>
+</html>

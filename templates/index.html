@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实时用量查询</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f5f7fa; color: #333; min-height: 100vh; }
+  .header { background: #fff; border-bottom: 1px solid #e4e7ed; padding: 0 24px; height: 56px; display: flex; align-items: center; }
+  .header h1 { font-size: 18px; font-weight: 600; color: #1a1a1a; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+  .filter-bar { background: #fff; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+  .config-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #f0f0f0; }
+  .filter-row { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+  .filter-item { display: flex; flex-direction: column; gap: 6px; }
+  .filter-item label { font-size: 13px; font-weight: 500; color: #606266; }
+  .filter-item input { height: 36px; padding: 0 12px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 14px; color: #333; outline: none; transition: border-color 0.2s; }
+  .filter-item input:focus { border-color: #409eff; }
+  .filter-item input[type="date"] { width: 160px; }
+  .filter-item input[type="text"],
+  .filter-item input[type="email"] { width: 220px; }
+  .filter-item input[type="password"] { width: 180px; }
+  .filter-item input[type="number"] { width: 140px; }
+  .btn { height: 36px; padding: 0 20px; border: none; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+  .btn-primary { background: #409eff; color: #fff; }
+  .btn-primary:hover { background: #337ecc; }
+  .btn-primary:disabled { background: #a0cfff; cursor: not-allowed; }
+  .error-msg { color: #f56c6c; font-size: 13px; display: none; margin-top: 8px; }
+
+  .metric-bar { display: flex; align-items: center; gap: 6px; margin-top: 16px; flex-wrap: wrap; }
+  .metric-bar .label { font-size: 13px; font-weight: 500; color: #606266; margin-right: 4px; }
+  .metric-btn { height: 32px; padding: 0 14px; border: 1px solid #dcdfe6; border-radius: 16px; font-size: 13px; cursor: pointer; background: #fff; color: #606266; transition: all 0.2s; }
+  .metric-btn:hover { border-color: #409eff; color: #409eff; }
+  .metric-btn.active { background: #409eff; color: #fff; border-color: #409eff; }
+  .metric-sep { width: 1px; height: 20px; background: #e4e7ed; margin: 0 6px; }
+  .auto-refresh { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #606266; margin-left: auto; }
+  .auto-refresh input { vertical-align: middle; }
+  .refresh-time { color: #909399; font-size: 12px; }
+
+  .chart-container { background: #fff; border-radius: 8px; padding: 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+  .chart-box { width: 100%; height: 500px; }
+  .no-data { display: flex; align-items: center; justify-content: center; height: 500px; color: #909399; font-size: 15px; }
+
+  .summary-bar { display: flex; align-items: baseline; gap: 24px; flex-wrap: wrap; padding: 4px 4px 18px; border-bottom: 1px solid #f0f0f0; margin-bottom: 18px; }
+  .summary-item { display: flex; flex-direction: column; gap: 4px; }
+  .summary-item .label { font-size: 12px; color: #909399; font-weight: 500; letter-spacing: 0.3px; }
+  .summary-item .value { font-size: 28px; font-weight: 600; color: #1a1a1a; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .summary-item.compare .value { font-size: 20px; color: #606266; font-weight: 500; }
+  .summary-item .sub { font-size: 12px; color: #909399; }
+  .summary-delta { font-size: 13px; font-weight: 500; padding: 3px 8px; border-radius: 10px; align-self: center; }
+  .summary-delta.up { background: #fef0e6; color: #e07f00; }
+  .summary-delta.down { background: #e7f7ee; color: #1f9550; }
+  .summary-delta.flat { background: #f0f2f5; color: #909399; }
+
+  .tables-wrap { margin-top: 20px; display: flex; flex-direction: column; gap: 20px; }
+  .table-card { background: #fff; border-radius: 8px; padding: 16px 20px 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+  .table-title { font-size: 14px; font-weight: 600; color: #1a1a1a; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+  .table-title .meta { font-size: 12px; font-weight: 400; color: #909399; }
+  .table-scroll { overflow-x: auto; }
+  table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 600px; }
+  table.data-table th, table.data-table td { padding: 6px 10px; text-align: right; border-bottom: 1px solid #f0f0f0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  table.data-table th:first-child, table.data-table td:first-child { text-align: left; position: sticky; left: 0; background: #fff; z-index: 1; color: #606266; font-weight: 500; }
+  table.data-table thead th { background: #fafafa; color: #606266; font-weight: 500; position: sticky; top: 0; }
+  table.data-table tbody tr:hover td { background: #f9fbff; }
+  table.data-table tbody tr.future td { color: #c0c4cc; }
+  table.data-table tbody tr.total-row td { font-weight: 600; color: #1a1a1a; border-top: 2px solid #e4e7ed; background: #fafbfc; }
+  table.data-table td.total-col { font-weight: 600; color: #1a1a1a; background: #fafbfc; }
+  table.data-table th.model-col { color: #1a1a1a; }
+  .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+
+  .quick-link { font-size: 13px; color: #409eff; text-decoration: none; padding: 0 4px; white-space: nowrap; cursor: pointer; }
+  .quick-link:hover { text-decoration: underline; }
+  .summary { font-size: 13px; color: #909399; }
+  .summary b { color: #333; }
+</style>
+</head>
+<body>
+<div class="header"><h1>实时用量查询</h1>
+  <span style="display:flex;gap:14px;margin-left:16px;">
+    <a class="quick-link" href="/settingsites">站点配置</a>
+    <a class="quick-link" href="/opsdingdongding">运维监控</a>
+    <a class="quick-link" href="/financemodel">财务模型</a>
+    <a class="quick-link" href="/usagecnusersearch">CN用量查询</a>
+  </span>
+</div>
+<div class="container">
+  <div class="filter-bar">
+    <div class="config-row">
+      <div class="filter-item">
+        <label>站点 <a class="quick-link" href="/settingsites">管理</a></label>
+        <select id="site" style="height:36px;padding:0 12px;border:1px solid #dcdfe6;border-radius:6px;font-size:14px;color:#333;outline:none;min-width:220px;background:#fff;"></select>
+      </div>
+      <div class="filter-item">
+        <label>目标用户邮箱（留空=全部用户）</label>
+        <input type="email" id="targetEmail" placeholder="留空则查全部用户" />
+      </div>
+    </div>
+    <div class="filter-row">
+      <div class="filter-item">
+        <label>观察日期</label>
+        <input type="date" id="startDate" value="{{ today }}" />
+      </div>
+      <div class="filter-item">
+        <label>对比日期</label>
+        <input type="date" id="endDate" value="{{ yesterday }}" />
+      </div>
+      <button class="btn btn-primary" id="queryBtn" onclick="doQuery()">查询</button>
+      <a class="quick-link" onclick="quickToday()">今天比昨天</a>
+      <a class="quick-link" onclick="quickWeek()">今天比上周同日</a>
+      <span class="summary" id="summary" style="display:none"></span>
+    </div>
+    <span class="error-msg" id="errorMsg"></span>
+
+    <div class="metric-bar" id="metricBar" style="display:none">
+      <span class="label">视图：</span>
+      <button class="metric-btn active" data-view="token">Token 量</button>
+      <button class="metric-btn" data-view="cost">消费额</button>
+      <span class="metric-sep"></span>
+      <span class="label">指标：</span>
+      <span id="tokenMetrics">
+        <button class="metric-btn active" data-metric="total">总Token</button>
+        <button class="metric-btn" data-metric="input">Input</button>
+        <button class="metric-btn" data-metric="output">Output</button>
+        <button class="metric-btn" data-metric="cache">Cache</button>
+        <button class="metric-btn" data-metric="hitrate">Cache Hit Rate</button>
+        <button class="metric-btn" data-metric="requests">请求数</button>
+      </span>
+      <span id="costMetrics" style="display:none">
+        <button class="metric-btn active" data-metric="actual_cost">实际扣费</button>
+        <button class="metric-btn" data-metric="cost">标准计费</button>
+      </span>
+      <span class="metric-sep"></span>
+      <span class="label">模式：</span>
+      <button class="metric-btn active" data-mode="incr">每小时增量</button>
+      <button class="metric-btn" data-mode="cum">累计</button>
+      <span class="auto-refresh">
+        <label><input type="checkbox" id="autoRefresh" checked /> 每 30s 自动刷新</label>
+        <span class="refresh-time" id="refreshTime"></span>
+      </span>
+    </div>
+  </div>
+
+  <div class="chart-container">
+    <div class="summary-bar" id="summaryBar" style="display:none"></div>
+    <div class="chart-box" id="chart"></div>
+    <div class="no-data" id="noData" style="display:none">暂无数据</div>
+  </div>
+
+  <div class="tables-wrap" id="tablesWrap" style="display:none"></div>
+</div>
+
+<script>
+const chartDom = document.getElementById('chart');
+const myChart = echarts.init(chartDom, null, { locale: 'ZH' });
+let currentView = 'token';     // 'token' | 'cost'
+let currentMetric = 'total';   // token: total/input/output/cache/hitrate/requests; cost: actual_cost/cost
+let currentMode = 'incr';
+let reportData = null;
+let comparisonCache = null;
+let refreshTimer = null;
+
+const COST_METRICS = new Set(['actual_cost', 'cost']);
+const CURRENCY_PREFIX = '$';   // change here if you want ¥ or omit
+
+const HOURS = Array.from({length: 24}, (_, i) => `${String(i).padStart(2,'0')}:00`);
+
+// ---- localStorage ----
+const LS = id => 'sub2report_'+id;
+function loadConfig() {
+  document.getElementById('targetEmail').value = localStorage.getItem(LS('target_email')) || '';
+}
+function saveConfig() {
+  localStorage.setItem(LS('target_email'), document.getElementById('targetEmail').value.trim());
+  localStorage.setItem(LS('site'), document.getElementById('site').value);
+}
+async function loadSites() {
+  const sel = document.getElementById('site');
+  try {
+    const resp = await fetch('/api/sites');
+    const data = await resp.json();
+    const sites = (data && data.sites) || [];
+    const saved = localStorage.getItem(LS('site')) || '';
+    let html = '<option value="">(选择站点)</option>';
+    sites.forEach(s => {
+      const n = String(s.name).replace(/"/g,'&quot;');
+      html += '<option value="'+n+'"'+(s.name===saved?' selected':'')+'>'+n+'</option>';
+    });
+    sel.innerHTML = html;
+  } catch(e) {
+    sel.innerHTML = '<option value="">(加载站点失败)</option>';
+  }
+}
+loadConfig();
+loadSites();
+
+// ---- view / metric / mode buttons ----
+function applyView(v) {
+  currentView = v;
+  document.querySelectorAll('.metric-btn[data-view]').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === v);
+  });
+  document.getElementById('tokenMetrics').style.display = v === 'token' ? '' : 'none';
+  document.getElementById('costMetrics').style.display  = v === 'cost'  ? '' : 'none';
+  // pick the active metric within the currently visible group
+  const groupId = v === 'token' ? 'tokenMetrics' : 'costMetrics';
+  const activeBtn = document.querySelector('#'+groupId+' .metric-btn.active')
+                 || document.querySelector('#'+groupId+' .metric-btn');
+  if (activeBtn) currentMetric = activeBtn.dataset.metric;
+}
+document.querySelectorAll('.metric-btn[data-view]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    applyView(btn.dataset.view);
+    renderChart();
+  });
+});
+document.querySelectorAll('.metric-btn[data-metric]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    // only deactivate siblings in the same group (token or cost)
+    const group = btn.closest('#tokenMetrics, #costMetrics') || document;
+    group.querySelectorAll('.metric-btn[data-metric]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentMetric = btn.dataset.metric;
+    renderChart();
+  });
+});
+document.querySelectorAll('.metric-btn[data-mode]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.metric-btn[data-mode]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentMode = btn.dataset.mode;
+    renderChart();
+  });
+});
+
+function formatTokens(v) {
+  if (v === null || v === undefined) return '-';
+  if (v >= 1e9) return (v/1e9).toFixed(2)+'B';
+  if (v >= 1e6) return (v/1e6).toFixed(2)+'M';
+  if (v >= 1e3) return (v/1e3).toFixed(2)+'K';
+  return Math.round(v).toLocaleString();
+}
+function formatCost(v) {
+  if (v === null || v === undefined) return '-';
+  const abs = Math.abs(v);
+  if (abs >= 1e6) return CURRENCY_PREFIX + (v/1e6).toFixed(2)+'M';
+  if (abs >= 1e3) return CURRENCY_PREFIX + (v/1e3).toFixed(2)+'K';
+  if (abs >= 1)   return CURRENCY_PREFIX + v.toFixed(2);
+  return CURRENCY_PREFIX + v.toFixed(4);  // small amounts: 4 decimals
+}
+function formatValue(v) {
+  if (currentMetric === 'hitrate') return (v === null || v === undefined) ? '-' : v + '%';
+  if (COST_METRICS.has(currentMetric)) return formatCost(v);
+  return formatTokens(v);
+}
+
+function getMetric(p, metric) {
+  if (!p) return 0;
+  switch (metric) {
+    case 'total': return (p.total_tokens != null)
+      ? p.total_tokens
+      : (p.input_tokens||0)+(p.output_tokens||0)+(p.cache_creation_tokens||0)+(p.cache_read_tokens||0);
+    case 'input': return p.input_tokens||0;
+    case 'output': return p.output_tokens||0;
+    case 'cache': return (p.cache_creation_tokens||0)+(p.cache_read_tokens||0);
+    case 'requests': return p.requests||0;
+    case 'hitrate': {
+      const d = (p.input_tokens||0)+(p.cache_read_tokens||0)+(p.cache_creation_tokens||0);
+      return d>0 ? +(((p.cache_read_tokens||0)/d)*100).toFixed(1) : 0;
+    }
+  }
+}
+
+// All "today / current hour" logic must use Beijing time (Asia/Shanghai),
+// not the browser's local timezone — otherwise users in other timezones, or
+// users in CN during 0–8 AM (when UTC is still on the previous day), get
+// off-by-one days / hours.
+function bjDateStr(d) {
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year:'numeric', month:'2-digit', day:'2-digit' });
+  return fmt.format(d || new Date());  // "YYYY-MM-DD"
+}
+function bjHour() {
+  const fmt = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour:'2-digit', hour12: false });
+  return parseInt(fmt.format(new Date()), 10);
+}
+
+function bjMinute() {
+  // Beijing-time minute (0..59) right now.
+  const fmt = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', minute:'2-digit' });
+  return parseInt(fmt.format(new Date()), 10);
+}
+function currentHourIndex(dateStr) {
+  // Returns the latest Beijing-time hour (0-23) that has elapsed for the given date,
+  // or 23 if the date is in the past.
+  const today = bjDateStr();
+  if (dateStr < today) return 23;
+  if (dateStr > today) return -1;
+  return bjHour();
+}
+function currentMinuteOfDay(dateStr) {
+  // Minutes elapsed today (BJ) for `dateStr`. 24*60 if past day; -1 if future.
+  const today = bjDateStr();
+  if (dateStr < today) return 24 * 60;
+  if (dateStr > today) return -1;
+  return bjHour() * 60 + bjMinute();
+}
+
+// Colors for stacked model series. Picked to remain distinguishable side-by-side.
+const MODEL_PALETTE = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#9b59b6', '#1abc9c', '#34495e', '#16a085'];
+const OTHER_COLOR = '#c0c4cc';
+
+function getMetricArray(byModel, model, metric) {
+  // Returns 24-element array of the chosen metric for a given model, computing
+  // hitrate per hour from constituent token arrays if needed.
+  const h = byModel[model];
+  if (!h) return new Array(24).fill(0);
+  if (metric === 'hitrate') {
+    return h.input_tokens.map((_, i) => {
+      const d = (h.input_tokens[i]||0) + (h.cache_read_tokens[i]||0) + (h.cache_creation_tokens[i]||0);
+      if (!d) return 0;
+      return +(((h.cache_read_tokens[i]||0)/d)*100).toFixed(1);
+    });
+  }
+  if (metric === 'cache') {
+    return h.cache_creation_tokens.map((v, i) => (v||0) + (h.cache_read_tokens[i]||0));
+  }
+  if (metric === 'total') return h.total_tokens.slice();
+  if (metric === 'input') return h.input_tokens.slice();
+  if (metric === 'output') return h.output_tokens.slice();
+  if (metric === 'requests') return h.requests.slice();
+  if (metric === 'actual_cost') return (h.actual_cost||new Array(24).fill(0)).slice();
+  if (metric === 'cost')        return (h.cost||new Array(24).fill(0)).slice();
+  return new Array(24).fill(0);
+}
+
+function maskAndCumulate(arr, mode, dateStr, maskFuture) {
+  let data = arr.slice();
+  if (mode === 'cum') {
+    let acc = 0;
+    data = data.map(v => { acc += (v||0); return acc; });
+  }
+  if (maskFuture) {
+    const cut = currentHourIndex(dateStr);
+    data = data.map((v, i) => i <= cut ? v : null);
+  }
+  return data;
+}
+
+function renderChart() {
+  const d = reportData;
+  if (!d || !d.observation) return;
+  const isPercent = currentMetric === 'hitrate';
+  const stackable = !isPercent; // hitrate can't stack — show as un-stacked bars
+
+  const obsModels = d.observation.models || [];
+  const cmpModels = (d.comparison && d.comparison.models) || [];
+  // Unified legend order: observation first, then any comparison-only models
+  const seenSet = new Set(obsModels);
+  const allModels = obsModels.slice();
+  cmpModels.forEach(m => { if (!seenSet.has(m)) { allModels.push(m); seenSet.add(m); } });
+
+  // Stable color mapping
+  const colorOf = (m, idx) => m === '其他' ? OTHER_COLOR : MODEL_PALETTE[idx % MODEL_PALETTE.length];
+
+  const series = [];
+  allModels.forEach((m, idx) => {
+    const color = colorOf(m, idx);
+    // observation series
+    if (d.observation.by_model[m]) {
+      const raw = getMetricArray(d.observation.by_model, m, currentMetric);
+      const data = maskAndCumulate(raw, currentMode, d.observation_date, true);
+      series.push({
+        name: m, type: 'bar',
+        stack: stackable ? 'obs' : undefined,
+        data: data,
+        itemStyle: { color, borderColor: '#1f2937', borderWidth: 1.5 },
+        barMaxWidth: 22,
+        emphasis: { focus: 'series' },
+        z: 3,
+      });
+    } else if (stackable) {
+      // keep legend/color stable: push an empty observation slot so legend toggles work uniformly
+      series.push({
+        name: m, type: 'bar',
+        stack: 'obs',
+        data: new Array(24).fill(0),
+        itemStyle: { color },
+        barMaxWidth: 22,
+      });
+    }
+  });
+  // comparison series share the same model legend (name=model). We use a second stack and a different barGap.
+  if (d.comparison) {
+    allModels.forEach((m, idx) => {
+      const color = colorOf(m, idx);
+      if (d.comparison.by_model[m]) {
+        const raw = getMetricArray(d.comparison.by_model, m, currentMetric);
+        const data = maskAndCumulate(raw, currentMode, d.comparison_date, false);
+        series.push({
+          name: m, type: 'bar',
+          stack: stackable ? 'cmp' : undefined,
+          data: data,
+          itemStyle: { color, opacity: 0.45 },
+          barMaxWidth: 22,
+          // Don't double-list in legend
+          tooltip: { formatter: null }
+        });
+      }
+    });
+  }
+  myChart.setOption({
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: function(ps) {
+        let h = '<b>'+ps[0].axisValue+'</b><br/>';
+        // Group by series.name: first occurrence = observation, second = comparison
+        const grouped = {};
+        ps.forEach(p => {
+          if (p.value == null) return;
+          if (!grouped[p.seriesName]) grouped[p.seriesName] = [];
+          grouped[p.seriesName].push(p);
+        });
+        Object.keys(grouped).forEach(name => {
+          const arr = grouped[name];
+          const obs = arr[0];
+          h += obs.marker+' '+name;
+          arr.forEach((p, i) => {
+            const tag = i === 0 ? (d.comparison ? '(观察)' : '') : '(对比)';
+            h += ' '+tag+' '+formatValue(p.value);
+          });
+          h += '<br/>';
+        });
+        return h;
+      }
+    },
+    legend: {
+      top: 10, textStyle:{fontSize:12},
+      data: allModels,
+    },
+    grid: { left: 80, right: 60, top: 60, bottom: 50 },
+    xAxis: {
+      type:'category', data: HOURS,
+      axisLabel:{fontSize:11}
+    },
+    yAxis: {
+      type:'value',
+      name: (function(){
+        if (isPercent) return 'Cache Hit Rate (%)';
+        if (COST_METRICS.has(currentMetric)) return currentMode === 'cum' ? '累计消费 ('+CURRENCY_PREFIX+')' : '每小时消费 ('+CURRENCY_PREFIX+')';
+        return currentMode === 'cum' ? '累计 Tokens' : '每小时 Tokens';
+      })(),
+      nameTextStyle:{fontSize:12},
+      min: isPercent ? 0 : undefined,
+      max: isPercent ? 100 : undefined,
+      axisLabel:{fontSize:11, formatter: v => formatValue(v)},
+      splitLine:{lineStyle:{color:'#f0f0f0'}}
+    },
+    series: series
+  }, true);
+  myChart.resize();
+  renderTables();
+  renderSummary();
+}
+window.addEventListener('resize', () => myChart.resize());
+
+function dayTotalUpToMinute(dayObj, minuteCutoff, prorateLastHour) {
+  // Sum of the current metric across all models, up to minuteCutoff (inclusive).
+  // minuteCutoff: 0..(24*60), where each hour-bucket h corresponds to minutes [h*60, h*60+59].
+  // prorateLastHour: if true, the bucket containing the cutoff is scaled by
+  //   (minutesIntoBucket/60) — used for the comparison day so it represents the
+  //   estimated cumulative at the same wall-clock moment. For the observation day,
+  //   we pass false: the partial-hour bucket from the live day already reflects
+  //   exactly what has happened so far (no need to estimate).
+  if (!dayObj) return 0;
+  if (minuteCutoff <= 0) return 0;
+  const cap = Math.min(minuteCutoff, 24 * 60);
+  const fullHours = Math.floor(cap / 60);           // hours 0..fullHours-1 are fully counted
+  const partialMin = cap - fullHours * 60;           // 0..59 minutes into hour `fullHours`
+  const hasPartial = partialMin > 0 && fullHours < 24;
+  const partialFrac = hasPartial ? partialMin / 60 : 0;
+
+  const models = dayObj.models || [];
+
+  if (currentMetric === 'hitrate') {
+    // Hitrate: average across hours where any traffic existed in the window.
+    // For the partial hour we still include the bucket's hitrate (a ratio, prorating it
+    // doesn't change the ratio), since it's already a representative %.
+    let sum = 0, cnt = 0;
+    const lastInclusive = hasPartial ? fullHours : fullHours - 1;
+    for (let h = 0; h <= lastInclusive; h++) {
+      if (h < 0 || h > 23) continue;
+      let inp=0, cr=0, cc=0;
+      models.forEach(m => {
+        const x = dayObj.by_model[m]; if (!x) return;
+        inp += x.input_tokens[h]||0; cr += x.cache_read_tokens[h]||0; cc += x.cache_creation_tokens[h]||0;
+      });
+      const d = inp + cr + cc;
+      if (d > 0) { sum += (cr/d)*100; cnt++; }
+    }
+    return cnt > 0 ? +(sum/cnt).toFixed(1) : 0;
+  }
+
+  let sum = 0;
+  models.forEach(m => {
+    const arr = getMetricArray(dayObj.by_model, m, currentMetric);
+    for (let h = 0; h < fullHours && h < 24; h++) sum += (arr[h] || 0);
+    if (hasPartial && fullHours < 24) {
+      const v = arr[fullHours] || 0;
+      sum += prorateLastHour ? v * partialFrac : v;
+    }
+  });
+  return sum;
+}
+
+function renderSummary() {
+  const bar = document.getElementById('summaryBar');
+  const d = reportData;
+  if (!d || !d.observation) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+
+  const metricLabel = ({
+    total:'总Token', input:'Input Token', output:'Output Token', cache:'Cache Token',
+    hitrate:'Cache Hit Rate', requests:'请求数',
+    actual_cost:'实际扣费', cost:'标准计费'
+  })[currentMetric] || currentMetric;
+
+  // Apples-to-apples: clip both days to the same minute window the observation
+  // day has elapsed through. The observation-day partial-hour bucket is taken as-is
+  // (real data so far); the comparison-day partial-hour bucket is linearly prorated.
+  const minuteCutoff = currentMinuteOfDay(d.observation_date);  // -1 future | 1440 past | live
+  const obsFullDay = minuteCutoff >= 24 * 60;
+  const obsVal = dayTotalUpToMinute(d.observation, minuteCutoff, false);
+  const cmpVal = d.comparison ? dayTotalUpToMinute(d.comparison, minuteCutoff, true) : null;
+  const cmpFullVal = (d.comparison && !obsFullDay) ? dayTotalUpToMinute(d.comparison, 24 * 60, false) : null;
+
+  const hh = Math.floor(Math.min(minuteCutoff, 24*60) / 60);
+  const mm = Math.min(minuteCutoff, 24*60) - hh * 60;
+  const cutoffLabel = obsFullDay
+    ? '全天'
+    : ('截至 ' + String(hh).padStart(2,'0') + ':' + String(mm).padStart(2,'0'));
+
+  let html = '';
+  html += '<div class="summary-item">';
+  html += '<span class="label">'+escapeHtml(d.observation_date)+' · '+escapeHtml(metricLabel)+'（观察 · '+cutoffLabel+'）</span>';
+  html += '<span class="value">'+formatValue(obsVal)+'</span>';
+  html += '</div>';
+
+  if (cmpVal !== null) {
+    html += '<div class="summary-item compare">';
+    const cmpLabel = obsFullDay ? '（对比 · 全天）' : '（对比 · 同时段，末尾不足整小时按比例估算）';
+    html += '<span class="label">'+escapeHtml(d.comparison_date)+escapeHtml(cmpLabel)+'</span>';
+    html += '<span class="value">'+formatValue(cmpVal)+'</span>';
+    if (cmpFullVal !== null) {
+      html += '<span class="sub">全天 '+formatValue(cmpFullVal)+'</span>';
+    }
+    html += '</div>';
+
+    if (currentMetric !== 'hitrate' && cmpVal > 0) {
+      const delta = obsVal - cmpVal;
+      const pct = (delta / cmpVal) * 100;
+      const cls = delta > 0 ? 'up' : (delta < 0 ? 'down' : 'flat');
+      const sign = delta > 0 ? '+' : '';
+      html += '<div class="summary-delta '+cls+'">较对比日同时段 '+sign+pct.toFixed(1)+'% （'+sign+formatValue(delta)+'）</div>';
+    } else if (currentMetric === 'hitrate' && cmpVal != null) {
+      const delta = obsVal - cmpVal;
+      const cls = delta > 0 ? 'up' : (delta < 0 ? 'down' : 'flat');
+      const sign = delta > 0 ? '+' : '';
+      html += '<div class="summary-delta '+cls+'">较对比日同时段 '+sign+delta.toFixed(1)+'%</div>';
+    }
+  }
+
+  bar.innerHTML = html;
+  bar.style.display = 'flex';
+}
+
+// ---------------- data tables ----------------
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+function buildDayTable(d, dayObj, dayDate, role, allModels, colorOf, maskFuture) {
+  // role: '观察' | '对比'
+  if (!dayObj) return '';
+  const isPercent = currentMetric === 'hitrate';
+  // per-model arrays for the current metric, *not* cumulative — table always shows per-hour raw values.
+  // (cumulative reading is easy via the column total.)
+  const cols = allModels.filter(m => dayObj.by_model[m]);
+  const arrays = cols.map(m => getMetricArray(dayObj.by_model, m, currentMetric));
+
+  // Column totals (per-model day total). For hitrate, average of nonzero hours.
+  const colTotals = arrays.map(arr => {
+    if (isPercent) {
+      const nonZero = arr.filter(v => v > 0);
+      if (!nonZero.length) return 0;
+      return +(nonZero.reduce((a,b)=>a+b,0) / nonZero.length).toFixed(1);
+    }
+    return arr.reduce((a,b) => a + (b||0), 0);
+  });
+
+  // Row totals (per-hour, all models). For hitrate, average across models (not meaningful but consistent).
+  const rowTotals = new Array(24).fill(0);
+  if (isPercent) {
+    for (let h = 0; h < 24; h++) {
+      const v = arrays.map(a => a[h]).filter(x => x > 0);
+      rowTotals[h] = v.length ? +(v.reduce((a,b)=>a+b,0)/v.length).toFixed(1) : 0;
+    }
+  } else {
+    for (let h = 0; h < 24; h++) {
+      for (let m = 0; m < arrays.length; m++) rowTotals[h] += (arrays[m][h] || 0);
+    }
+  }
+  const grandTotal = isPercent
+    ? (function(){
+        const v = colTotals.filter(x => x > 0);
+        return v.length ? +(v.reduce((a,b)=>a+b,0)/v.length).toFixed(1) : 0;
+      })()
+    : colTotals.reduce((a,b) => a + b, 0);
+
+  const futureCut = maskFuture ? currentHourIndex(dayDate) : 23;
+
+  const metricLabel = ({
+    total:'总Token', input:'Input', output:'Output', cache:'Cache',
+    hitrate:'Cache Hit Rate', requests:'请求数',
+    actual_cost:'实际扣费', cost:'标准计费'
+  })[currentMetric] || currentMetric;
+
+  let html = '<div class="table-card">';
+  html += '<div class="table-title"><span>'+role+'日 · '+escapeHtml(dayDate)+'</span>';
+  html += '<span class="meta">'+escapeHtml(metricLabel)+' · 每小时</span></div>';
+  html += '<div class="table-scroll"><table class="data-table"><thead><tr>';
+  html += '<th>时间</th>';
+  cols.forEach((m, i) => {
+    html += '<th class="model-col"><span class="swatch" style="background:'+colorOf(m, allModels.indexOf(m))+'"></span>'+escapeHtml(m)+'</th>';
+  });
+  html += '<th class="total-col">合计</th></tr></thead><tbody>';
+
+  for (let h = 0; h < 24; h++) {
+    const future = h > futureCut;
+    html += '<tr'+(future?' class="future"':'')+'>';
+    html += '<td>'+String(h).padStart(2,'0')+':00</td>';
+    cols.forEach((m, i) => {
+      const v = arrays[i][h];
+      html += '<td>'+(future ? '-' : (v === 0 ? '<span style="color:#dcdfe6">·</span>' : formatValue(v)))+'</td>';
+    });
+    html += '<td class="total-col">'+(future ? '-' : (rowTotals[h] === 0 ? '<span style="color:#dcdfe6">·</span>' : formatValue(rowTotals[h])))+'</td>';
+    html += '</tr>';
+  }
+  html += '<tr class="total-row"><td>'+(isPercent ? '平均' : '合计')+'</td>';
+  cols.forEach((m, i) => {
+    html += '<td>'+formatValue(colTotals[i])+'</td>';
+  });
+  html += '<td class="total-col">'+formatValue(grandTotal)+'</td></tr>';
+  html += '</tbody></table></div></div>';
+  return html;
+}
+
+function renderTables() {
+  const wrap = document.getElementById('tablesWrap');
+  const d = reportData;
+  if (!d || !d.observation) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+
+  const obsModels = d.observation.models || [];
+  const cmpModels = (d.comparison && d.comparison.models) || [];
+  const seen = new Set(obsModels);
+  const allModels = obsModels.slice();
+  cmpModels.forEach(m => { if (!seen.has(m)) { allModels.push(m); seen.add(m); } });
+  const colorOf = (m, idx) => m === '其他' ? OTHER_COLOR : MODEL_PALETTE[idx % MODEL_PALETTE.length];
+
+  let html = '';
+  html += buildDayTable(d, d.observation, d.observation_date, '观察', allModels, colorOf, true);
+  if (d.comparison) html += buildDayTable(d, d.comparison, d.comparison_date, '对比', allModels, colorOf, false);
+  wrap.innerHTML = html;
+  wrap.style.display = '';
+}
+
+// ---- query ----
+function dateStr(d) { return bjDateStr(d); }
+function quickToday() {
+  const t = new Date();
+  const y = new Date(t); y.setDate(y.getDate()-1);
+  document.getElementById('startDate').value = dateStr(t);
+  document.getElementById('endDate').value = dateStr(y);
+  doQuery();
+}
+function quickWeek() {
+  const t = new Date();
+  const w = new Date(t); w.setDate(w.getDate()-7);
+  document.getElementById('startDate').value = dateStr(t);
+  document.getElementById('endDate').value = dateStr(w);
+  doQuery();
+}
+function doQuery(opts) {
+  saveConfig();
+  const site = document.getElementById('site').value;
+  const targetEmail = document.getElementById('targetEmail').value.trim();
+  const sd = document.getElementById('startDate').value;
+  const ed = document.getElementById('endDate').value;
+  if (!site) { showError('请选择站点（可在「站点配置」中添加）'); return; }
+  if (!sd||!ed) return;
+  fetchReport({ site, targetEmail, observation_date: sd, comparison_date: ed, only_obs: !!(opts && opts.only_obs) });
+}
+function showError(msg) {
+  const el = document.getElementById('errorMsg');
+  el.style.display = 'block'; el.textContent = msg;
+}
+
+async function fetchReport(args) {
+  const errorEl = document.getElementById('errorMsg');
+  const noDataEl = document.getElementById('noData');
+  const metricBar = document.getElementById('metricBar');
+  const summaryEl = document.getElementById('summary');
+  const queryBtn = document.getElementById('queryBtn');
+  const refreshTimeEl = document.getElementById('refreshTime');
+  errorEl.style.display = 'none';
+  if (!args.only_obs) { queryBtn.disabled = true; queryBtn.textContent = '查询中...'; }
+
+  try {
+    const fd = new FormData();
+    fd.set('site', args.site);
+    fd.set('target_email', args.targetEmail);
+    fd.set('observation_date', args.observation_date);
+    fd.set('comparison_date', args.comparison_date);
+    if (args.only_obs) fd.set('refresh_observation_only', '1');
+    const resp = await fetch('/api/report', { method: 'POST', body: fd });
+    const result = await resp.json();
+
+    if (result.error) {
+      showError(result.error);
+      if (!args.only_obs) {
+        metricBar.style.display = 'none';
+        noDataEl.style.display = 'flex'; chartDom.style.display = 'none';
+        summaryEl.style.display = 'none';
+        document.getElementById('tablesWrap').style.display = 'none';
+        document.getElementById('summaryBar').style.display = 'none';
+      }
+      return;
+    }
+
+    if (args.only_obs) {
+      // merge with cached comparison
+      reportData = Object.assign({}, reportData, {
+        observation_date: result.observation_date,
+        observation: result.observation,
+        server_time: result.server_time,
+      });
+    } else {
+      reportData = result;
+    }
+
+    metricBar.style.display = 'flex';
+    summaryEl.style.display = 'inline';
+    const who = result.target_user ? (result.target_user.email || '全部用户') : '全部用户';
+    summaryEl.innerHTML =
+      '用户: <b>'+who+'</b> &nbsp;|&nbsp; '+
+      '观察 <b>'+reportData.observation_date+'</b> &nbsp;|&nbsp; '+
+      '对比 <b>'+(reportData.comparison_date||'-')+'</b>';
+
+    const hasData = (d) => d && d.total && d.total.total_tokens && d.total.total_tokens.some(v => v > 0);
+    const hasObs = hasData(reportData.observation);
+    const hasCmp = hasData(reportData.comparison);
+    if (!hasObs && !hasCmp) {
+      noDataEl.style.display = 'flex';
+      noDataEl.textContent = '所选日期无使用记录';
+      chartDom.style.display = 'none';
+      document.getElementById('tablesWrap').style.display = 'none';
+      document.getElementById('summaryBar').style.display = 'none';
+    } else {
+      noDataEl.style.display = 'none'; chartDom.style.display = 'block';
+      renderChart();
+    }
+    refreshTimeEl.textContent = '更新于 ' + new Date().toLocaleTimeString();
+    scheduleAutoRefresh();
+  } catch(e) {
+    showError('请求失败: '+e.message);
+  } finally {
+    queryBtn.disabled = false; queryBtn.textContent = '查询';
+  }
+}
+
+function scheduleAutoRefresh() {
+  if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+  const on = document.getElementById('autoRefresh').checked;
+  if (!on || !reportData) return;
+  refreshTimer = setTimeout(() => {
+    // Only refresh observation; comparison is historical and won't change.
+    if (!document.getElementById('site').value) return;
+    doQuery({ only_obs: true });
+  }, 30000);
+}
+document.getElementById('autoRefresh').addEventListener('change', scheduleAutoRefresh);
+
+// ---- init ----
+(function init() {
+  const p = new URLSearchParams(location.search);
+  if (p.get('observation_date')) document.getElementById('startDate').value = p.get('observation_date');
+  if (p.get('comparison_date')) document.getElementById('endDate').value = p.get('comparison_date');
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>财务收益模型</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f5f7fa; color: #333; min-height: 100vh; }
+  .header { background: #fff; border-bottom: 1px solid #e4e7ed; padding: 0 24px; height: 56px; display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 18px; font-weight: 600; color: #1a1a1a; }
+  .header a { font-size: 13px; color: #409eff; text-decoration: none; }
+  .container { max-width: 1500px; margin: 0 auto; padding: 20px; }
+  .card { background: #fff; border-radius: 8px; padding: 18px 20px; margin-bottom: 18px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+  .card h2 { font-size: 14px; font-weight: 600; color: #1a1a1a; margin-bottom: 14px; display: flex; align-items: center; gap: 10px; }
+  .card h2 .hint { font-size: 12px; font-weight: 400; color: #909399; }
+
+  .form-row { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-end; }
+  .fi { display: flex; flex-direction: column; gap: 5px; }
+  .fi label { font-size: 12px; color: #606266; font-weight: 500; }
+  .fi input { height: 32px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 13px; outline: none; }
+  .fi input:focus { border-color: #409eff; }
+  .fi .w-date { width: 150px; }
+
+  table.cfg { width: 100%; border-collapse: collapse; }
+  table.cfg th { font-size: 12px; color: #909399; font-weight: 500; text-align: left; padding: 4px 8px; }
+  table.cfg td { padding: 4px 8px; }
+  table.cfg input { width: 100%; height: 32px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 13px; outline: none; }
+  table.cfg input:focus { border-color: #409eff; }
+  .col-name { width: 160px; } .col-url { width: 300px; } .col-mail { width: 220px; } .col-pwd { width: 160px; } .col-del { width: 50px; }
+
+  .users-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(470px, 1fr)); gap: 14px; }
+  .user-panel { border: 1px solid #ebeef5; border-radius: 8px; padding: 12px 14px; background: #fcfdff; }
+  .user-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .user-head .u-station { width: 150px; height: 32px; padding: 0 8px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 13px; outline: none; background: #fff; }
+  .user-head .u-name { flex: 1; height: 32px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 13px; font-weight: 600; outline: none; }
+  .user-head .u-name:focus, .user-head .u-station:focus { border-color: #409eff; }
+
+  table.params { width: 100%; border-collapse: collapse; }
+  table.params th { font-size: 11px; color: #909399; font-weight: 500; padding: 4px 6px; text-align: center; border-bottom: 1px solid #ebeef5; }
+  table.params td { padding: 4px 6px; text-align: center; }
+  table.params td.plat { font-weight: 600; color: #1a1a1a; text-align: left; white-space: nowrap; }
+  table.params input { width: 72px; height: 28px; padding: 0 6px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 12px; outline: none; text-align: right; }
+  table.params input:focus { border-color: #409eff; }
+
+  .btn { height: 34px; padding: 0 18px; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+  .btn-primary { background: #409eff; color: #fff; }
+  .btn-primary:hover { background: #337ecc; }
+  .btn-primary:disabled { background: #a0cfff; cursor: not-allowed; }
+  .btn-ghost { background: #fff; color: #606266; border: 1px solid #dcdfe6; }
+  .btn-ghost:hover { border-color: #409eff; color: #409eff; }
+  .btn-del { background: #fff; color: #f56c6c; border: 1px solid #fbc4c4; height: 30px; padding: 0 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .btn-del:hover { background: #fef0f0; }
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+  .meta { color: #909399; font-size: 12px; }
+  .err-banner { color: #f56c6c; font-size: 13px; margin-top: 10px; display: none; }
+
+  .result-wrap { overflow-x: auto; }
+  table.fin { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.fin th { background: #fafafa; color: #606266; font-weight: 600; padding: 9px 12px; text-align: right; border-bottom: 2px solid #ebeef5; }
+  table.fin th.l, table.fin td.l { text-align: left; }
+  table.fin th.gpt { background: #eef5ff; } table.fin th.claude { background: #fff3ec; } table.fin th.gemini { background: #eefaf0; }
+  table.fin td { padding: 8px 12px; text-align: right; border-bottom: 1px solid #f0f2f5; }
+  table.fin tr:hover td { background: #f8fbff; }
+  table.fin td.rev { color: #1f9550; font-weight: 600; }
+  table.fin td.key { font-weight: 600; color: #1a1a1a; }
+  table.fin td.station { color: #606266; }
+  table.fin td.err { color: #f56c6c; text-align: left; white-space: normal; }
+  table.fin tr.total td { border-top: 2px solid #ebeef5; background: #fafcff; font-weight: 700; }
+  table.fin tr.total td.rev { color: #1f9550; }
+  .empty { color: #c0c4cc; font-size: 13px; padding: 24px 0; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>财务收益模型</h1>
+    <a href="/settingsites">站点配置</a>
+    <a href="/opsdingdongding">运维监控</a>
+    <a href="/usagerealtime">实时用量</a>
+    <a href="/usagecnusersearch">CN用量查询</a>
+  </div>
+  <div class="container">
+
+    <div class="card">
+      <h2>用户贡献参数 <span class="hint">站点统一在 <a href="/settingsites">站点配置</a> 维护。每个用户选所属站点 + 用户名/邮箱 + 自己的分平台参数(%)。日收益=消费额e×合同折扣比例b−(消费额e×合同折扣比例b×(b−c)/b×(1−分佣剩余比例d))−消费额e×真实成本率a。改参数即时本地重算，不重新查询</span></h2>
+      <div class="users-grid" id="usersGrid"></div>
+      <div class="actions">
+        <button class="btn btn-ghost" id="addUser">+ 添加用户</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>结算条件</h2>
+      <div class="form-row">
+        <div class="fi"><label>开始日期</label><input type="date" id="startDate" class="w-date" value="{{ week_ago }}"></div>
+        <div class="fi"><label>结束日期</label><input type="date" id="endDate" class="w-date" value="{{ today }}"></div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-ghost" id="saveCfg">保存配置</button>
+        <button class="btn btn-primary" id="queryBtn">查询</button>
+        <span class="meta" id="metaInfo"></span>
+      </div>
+      <div class="err-banner" id="errBanner"></div>
+    </div>
+
+    <div class="card">
+      <h2>每用户小计 <span class="hint" id="subHint"></span></h2>
+      <div class="result-wrap">
+        <table class="fin" id="subTable" style="display:none;">
+          <thead>
+            <tr>
+              <th class="l">用户</th>
+              <th class="l">站点</th>
+              <th class="gpt">GPT 消费额</th><th class="gpt">GPT 收益</th>
+              <th class="claude">Claude 消费额</th><th class="claude">Claude 收益</th>
+              <th class="gemini">Gemini 消费额</th><th class="gemini">Gemini 收益</th>
+              <th>用户总收益</th><th>用户总收益(￥)</th>
+            </tr>
+          </thead>
+          <tbody id="subBody"></tbody>
+          <tfoot id="subFoot"></tfoot>
+        </table>
+        <div class="empty" id="subEmpty">填写时间段、站点列表、用户贡献参数后点「查询」。</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>按天合计 <span class="hint">全部站点全部用户按天加和(各用户用各自参数)</span></h2>
+      <div class="result-wrap">
+        <table class="fin" id="dayTable" style="display:none;">
+          <thead>
+            <tr>
+              <th class="l">日期</th>
+              <th class="gpt">GPT 收益</th>
+              <th class="claude">Claude 收益</th>
+              <th class="gemini">Gemini 收益</th>
+              <th>当天总收益</th><th>当天总收益(￥)</th>
+            </tr>
+          </thead>
+          <tbody id="dayBody"></tbody>
+          <tfoot id="dayFoot"></tfoot>
+        </table>
+        <div class="empty" id="dayEmpty">暂无数据。</div>
+      </div>
+    </div>
+
+  </div>
+
+<script>
+const LS_TIME = "sub2report_finance_time";
+const LS_USERS = "sub2report_finance_users";
+const PLATS = [["gpt","GPT"],["claude","Claude"],["gemini","Gemini"]];
+let lastResults = null;  // [{key, username, station, ok, error?, days:[{date,gpt,claude,gemini}]}]
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => (s || "").replace(/"/g, "&quot;");
+const fmtMoney = (v) => (Number(v) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const CNY = 6.8;
+const ukey = (station, username) => `${(station||"").trim().toLowerCase()}||${(username||"").trim().toLowerCase()}`;
+
+// ---------- 站点（来自服务端 /api/sites） ----------
+let SITE_NAMES = [];
+async function loadSiteNames() {
+  try {
+    const resp = await fetch("/api/sites");
+    const data = await resp.json();
+    SITE_NAMES = ((data && data.sites) || []).map((s) => s.name).filter((x) => x);
+  } catch (e) { SITE_NAMES = []; }
+  refreshStationSelects();
+}
+function refreshStationSelects() {
+  $("usersGrid").querySelectorAll(".u-station").forEach((sel) => fillSelect(sel, sel.value));
+}
+
+// ---------- 用户面板 ----------
+function makeUserPanel(data) {
+  data = data || { station: "", username: "", p: {} };
+  const panel = document.createElement("div");
+  panel.className = "user-panel";
+  let rows = "";
+  for (const [key, label] of PLATS) {
+    const pp = (data.p && data.p[key]) || {};
+    const val = (k) => (pp[k] === undefined || pp[k] === null ? "" : pp[k]);
+    rows += `<tr>
+      <td class="plat">${label}</td>
+      <td><input type="number" step="0.01" min="0" data-p="${key}" data-k="a" value="${val('a')}"></td>
+      <td><input type="number" step="0.01" min="0" data-p="${key}" data-k="b" value="${val('b')}"></td>
+      <td><input type="number" step="0.01" min="0" data-p="${key}" data-k="c" value="${val('c')}"></td>
+      <td><input type="number" step="0.01" min="0" data-p="${key}" data-k="d" value="${val('d')}"></td>
+    </tr>`;
+  }
+  panel.innerHTML = `
+    <div class="user-head">
+      <select class="u-station" title="所属站点"></select>
+      <input class="u-name" placeholder="用户名 / 邮箱" value="${esc(data.username)}">
+      <button class="btn-del" type="button">删除</button>
+    </div>
+    <table class="params">
+      <thead><tr>
+        <th>平台</th><th>真实成本率 a%</th><th>合同折扣比例 b%</th><th>预计成本率 c%</th><th>分佣剩余比例 d%</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  panel.querySelector(".btn-del").onclick = () => { panel.remove(); saveUsers(); if (lastResults) render(); };
+  panel.querySelector(".u-name").addEventListener("input", () => { saveUsers(); if (lastResults) render(); });
+  panel.querySelector(".u-station").addEventListener("change", () => { saveUsers(); if (lastResults) render(); });
+  panel.querySelectorAll("input[data-p]").forEach((el) => el.addEventListener("input", () => { saveUsers(); if (lastResults) render(); }));
+  // 先插 select 选项再设值
+  setTimeout(() => { const sel = panel.querySelector(".u-station"); fillSelect(sel, data.station); }, 0);
+  return panel;
+}
+function fillSelect(sel, cur) {
+  let html = `<option value="">(选站点)</option>`;
+  let has = false;
+  SITE_NAMES.forEach((n) => { html += `<option value="${esc(n)}"${n === cur ? " selected" : ""}>${esc(n)}</option>`; if (n === cur) has = true; });
+  if (cur && !has) html += `<option value="${esc(cur)}" selected>${esc(cur)} (未在站点配置)</option>`;
+  sel.innerHTML = html;
+}
+function collectUsers() {
+  const out = [];
+  $("usersGrid").querySelectorAll(".user-panel").forEach((panel) => {
+    const station = panel.querySelector(".u-station").value.trim();
+    const username = panel.querySelector(".u-name").value.trim();
+    const p = {};
+    for (const [key] of PLATS) p[key] = { a: 0, b: 0, c: 0, d: 0 };
+    panel.querySelectorAll("input[data-p]").forEach((el) => {
+      const v = parseFloat(el.value);
+      p[el.dataset.p][el.dataset.k] = isNaN(v) ? 0 : v;
+    });
+    out.push({ station, username, p });
+  });
+  return out;
+}
+function saveUsers() { localStorage.setItem(LS_USERS, JSON.stringify(collectUsers())); }
+function loadUsers() {
+  let arr = [];
+  try { arr = JSON.parse(localStorage.getItem(LS_USERS) || "[]"); } catch (e) {}
+  if (!Array.isArray(arr) || !arr.length) arr = [{ station: "", username: "", p: {} }];
+  const grid = $("usersGrid"); grid.innerHTML = "";
+  arr.forEach((u) => grid.appendChild(makeUserPanel(u)));
+}
+
+// ---------- 时间段 ----------
+function getTime() { return { start: $("startDate").value, end: $("endDate").value }; }
+function saveTime() { localStorage.setItem(LS_TIME, JSON.stringify(getTime())); }
+function loadTime() {
+  let t = {};
+  try { t = JSON.parse(localStorage.getItem(LS_TIME) || "{}"); } catch (e) {}
+  if (t.start) $("startDate").value = t.start;
+  if (t.end) $("endDate").value = t.end;
+}
+
+// ---------- 计算 ----------
+const factor = (prm) => { const a=prm.a/100, b=prm.b/100, c=prm.c/100, d=prm.d/100; const mid = b===0 ? 0 : b*(b-c)/b*(1-d); return b - mid - a; };  // 收益=e*[b-(b*(b-c)/b*(1-d))-a]
+function paramByKey() {
+  const m = {};
+  collectUsers().forEach((u) => { if (u.username && u.station) m[ukey(u.station, u.username)] = u.p; });
+  return m;
+}
+const blankP = { gpt:{a:0,b:0,c:0,d:0}, claude:{a:0,b:0,c:0,d:0}, gemini:{a:0,b:0,c:0,d:0} };
+
+function render() {
+  const pmap = paramByKey();
+  renderSubtotal(pmap);
+  renderDaily(pmap);
+}
+
+function renderSubtotal(pmap) {
+  const body = $("subBody"), foot = $("subFoot");
+  body.innerHTML = ""; foot.innerHTML = "";
+  if (!lastResults || !lastResults.length) { $("subTable").style.display = "none"; $("subEmpty").style.display = "block"; return; }
+  $("subTable").style.display = ""; $("subEmpty").style.display = "none";
+  const grand = { gpt:{e:0,r:0}, claude:{e:0,r:0}, gemini:{e:0,r:0}, rev:0 };
+  for (const res of lastResults) {
+    const tr = document.createElement("tr");
+    if (!res.ok) {
+      tr.innerHTML = `<td class="key l">${res.username || "?"}</td><td class="station l">${res.station || ""}</td><td class="err" colspan="8">${res.error || "查询失败"}</td>`;
+      body.appendChild(tr); continue;
+    }
+    const prm = pmap[ukey(res.station, res.username)] || blankP;
+    const tot = { gpt:{e:0,r:0}, claude:{e:0,r:0}, gemini:{e:0,r:0} };
+    for (const d of (res.days || [])) for (const [key] of PLATS) tot[key].e += Number(d[key]) || 0;
+    let userRev = 0, cells = "";
+    for (const [key] of PLATS) {
+      const r = tot[key].e * factor(prm[key]);
+      userRev += r; grand[key].e += tot[key].e; grand[key].r += r;
+      cells += `<td>${fmtMoney(tot[key].e)}</td><td class="rev">${fmtMoney(r)}</td>`;
+    }
+    grand.rev += userRev;
+    tr.innerHTML = `<td class="key l">${res.username}</td><td class="station l">${res.station || ""}</td>${cells}<td class="rev">${fmtMoney(userRev)}</td><td class="rev">${fmtMoney(userRev*CNY)}</td>`;
+    body.appendChild(tr);
+  }
+  let fc = "";
+  for (const [key] of PLATS) fc += `<td>${fmtMoney(grand[key].e)}</td><td class="rev">${fmtMoney(grand[key].r)}</td>`;
+  foot.innerHTML = `<tr class="total"><td class="l">合计</td><td class="l"></td>${fc}<td class="rev">${fmtMoney(grand.rev)}</td><td class="rev">${fmtMoney(grand.rev*CNY)}</td></tr>`;
+}
+
+function renderDaily(pmap) {
+  const body = $("dayBody"), foot = $("dayFoot");
+  body.innerHTML = ""; foot.innerHTML = "";
+  const dayMap = {}; let any = false;
+  for (const res of lastResults || []) {
+    if (!res.ok) continue;
+    const prm = pmap[ukey(res.station, res.username)] || blankP;
+    for (const d of (res.days || [])) {
+      any = true;
+      if (!dayMap[d.date]) dayMap[d.date] = { gpt:0, claude:0, gemini:0 };
+      for (const [key] of PLATS) dayMap[d.date][key] += (Number(d[key]) || 0) * factor(prm[key]);
+    }
+  }
+  if (!any) { $("dayTable").style.display = "none"; $("dayEmpty").style.display = "block"; return; }
+  $("dayTable").style.display = ""; $("dayEmpty").style.display = "none";
+  const grand = { gpt:0, claude:0, gemini:0, rev:0 };
+  for (const dt of Object.keys(dayMap).sort()) {
+    const row = dayMap[dt];
+    const dayRev = row.gpt + row.claude + row.gemini;
+    grand.gpt += row.gpt; grand.claude += row.claude; grand.gemini += row.gemini; grand.rev += dayRev;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="key l">${dt}</td><td class="rev">${fmtMoney(row.gpt)}</td><td class="rev">${fmtMoney(row.claude)}</td><td class="rev">${fmtMoney(row.gemini)}</td><td class="rev">${fmtMoney(dayRev)}</td><td class="rev">${fmtMoney(dayRev*CNY)}</td>`;
+    body.appendChild(tr);
+  }
+  foot.innerHTML = `<tr class="total"><td class="l">合计</td><td class="rev">${fmtMoney(grand.gpt)}</td><td class="rev">${fmtMoney(grand.claude)}</td><td class="rev">${fmtMoney(grand.gemini)}</td><td class="rev">${fmtMoney(grand.rev)}</td><td class="rev">${fmtMoney(grand.rev*CNY)}</td></tr>`;
+}
+
+// ---------- 查询 ----------
+async function doQuery() {
+  const t = getTime();
+  const eb = $("errBanner"); eb.style.display = "none";
+  if (!t.start || !t.end) { eb.textContent = "请选择开始与结束日期。"; eb.style.display = "block"; return; }
+  const payloadUsers = [];
+  const problems = [];
+  for (const u of collectUsers()) {
+    if (!u.username && !u.station) continue;
+    if (!u.station) { problems.push(`用户「${u.username}」未选站点`); continue; }
+    if (!u.username) { problems.push(`站点「${u.station}」下有空用户名`); continue; }
+    payloadUsers.push({
+      key: ukey(u.station, u.username),
+      station_name: u.station,
+      username: u.username,
+    });
+  }
+  if (problems.length) { eb.innerHTML = problems.join("；"); eb.style.display = "block"; }
+  if (!payloadUsers.length) { if (!problems.length) { eb.textContent = "请至少添加一个「站点 + 用户名」。"; eb.style.display = "block"; } return; }
+
+  const btn = $("queryBtn"); btn.disabled = true; btn.textContent = "查询中…"; $("metaInfo").textContent = "";
+  try {
+    const resp = await fetch("/api/finance", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ start: t.start, end: t.end, users: payloadUsers }),
+    });
+    const data = await resp.json();
+    if (!data.ok) { lastResults = null; render(); eb.textContent = data.error || "查询失败"; eb.style.display = "block"; }
+    else {
+      lastResults = data.results || []; render();
+      const okN = lastResults.filter((r) => r.ok).length, failN = lastResults.length - okN;
+      $("metaInfo").textContent = `${okN} 个用户成功${failN ? "，" + failN + " 个失败" : ""} · 刷新于 ${data.server_time || ""}`;
+      $("subHint").textContent = `${t.start} ~ ${t.end} · 消费额 e = actual_cost(实际扣除) · 仅统计 GPT/Claude/Gemini`;
+    }
+  } catch (err) { eb.textContent = "请求出错: " + err; eb.style.display = "block"; }
+  finally { btn.disabled = false; btn.textContent = "查询"; }
+}
+
+// ---------- init ----------
+loadUsers();
+loadTime();
+loadSiteNames();
+$("addUser").onclick = () => { $("usersGrid").appendChild(makeUserPanel()); saveUsers(); };
+$("saveCfg").onclick = () => { saveTime(); saveUsers(); $("metaInfo").textContent = "已保存到本浏览器"; };
+$("queryBtn").onclick = doQuery;
+["startDate","endDate"].forEach((id) => $(id).addEventListener("change", saveTime));
+</script>
+</body>
+</html>

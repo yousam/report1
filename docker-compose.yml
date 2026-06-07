@@ -1,0 +1,25 @@
+# sub2report — 多站点 sub2api 用量/财务/运维聚合报表
+#
+# 快速启动：
+#   docker compose up -d --build
+#   打开 http://<host>:5000/settingsites 添加站点（站点名/baseURL/管理员邮箱/密码）
+#   其余页面：/usagerealtime  /financemodel  /opsdingdongding  /usagecnusersearch
+#
+# 站点凭证保存在挂载卷 ./sub2report_data/sites.json（已被 .gitignore 忽略，不入库）。
+# usagecnusersearch 默认使用名称为 "CN" 的站点。
+
+services:
+  sub2report:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sub2report:latest
+    container_name: sub2report
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      SITES_FILE: /data/sites.json
+      TZ: Asia/Shanghai
+    volumes:
+      - ./sub2report_data:/data

@@ -1,0 +1,14 @@
+[
+  {
+    "name": "CN",
+    "base_url": "https://your-station.example.com",
+    "email": "admin@example.com",
+    "password": "change-me"
+  },
+  {
+    "name": "A",
+    "base_url": "https://another-station.example.com",
+    "email": "admin@example.com",
+    "password": "change-me"
+  }
+]

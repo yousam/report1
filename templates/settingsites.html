@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>站点配置</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f5f7fa; color: #333; min-height: 100vh; }
+  .header { background: #fff; border-bottom: 1px solid #e4e7ed; padding: 0 24px; height: 56px; display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 18px; font-weight: 600; color: #1a1a1a; }
+  .nav { display: flex; gap: 14px; margin-left: 8px; }
+  .nav a { font-size: 13px; color: #409eff; text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .card { background: #fff; border-radius: 8px; padding: 18px 20px; margin-bottom: 18px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+  .card h2 { font-size: 14px; font-weight: 600; color: #1a1a1a; margin-bottom: 6px; }
+  .card .hint { font-size: 12px; font-weight: 400; color: #909399; margin-bottom: 14px; display: block; }
+  table.cfg { width: 100%; border-collapse: collapse; }
+  table.cfg th { font-size: 12px; color: #909399; font-weight: 500; text-align: left; padding: 6px 8px; }
+  table.cfg td { padding: 6px 8px; vertical-align: middle; }
+  table.cfg input { width: 100%; height: 34px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 13px; outline: none; }
+  table.cfg input:focus { border-color: #409eff; }
+  .col-name { width: 150px; } .col-url { width: 290px; } .col-mail { width: 210px; } .col-pwd { width: 170px; } .col-op { width: 150px; }
+  .btn { height: 34px; padding: 0 18px; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+  .btn-primary { background: #409eff; color: #fff; }
+  .btn-primary:hover { background: #337ecc; }
+  .btn-primary:disabled { background: #a0cfff; cursor: not-allowed; }
+  .btn-ghost { background: #fff; color: #606266; border: 1px solid #dcdfe6; }
+  .btn-ghost:hover { border-color: #409eff; color: #409eff; }
+  .btn-sm { height: 30px; padding: 0 12px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+  .btn-test { background: #fff; color: #409eff; border: 1px solid #b3d8ff; }
+  .btn-test:hover { background: #ecf5ff; }
+  .btn-del { background: #fff; color: #f56c6c; border: 1px solid #fbc4c4; }
+  .btn-del:hover { background: #fef0f0; }
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+  .meta { color: #909399; font-size: 12px; }
+  .row-status { font-size: 12px; margin-left: 4px; white-space: nowrap; }
+  .ok { color: #1f9550; } .bad { color: #f56c6c; } .muted { color: #909399; }
+  .err-banner { color: #f56c6c; font-size: 13px; margin-top: 10px; display: none; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>站点配置</h1>
+    <div class="nav">
+      <a href="/settingsites">站点配置</a>
+      <a href="/opsdingdongding">运维监控</a>
+      <a href="/financemodel">财务模型</a>
+      <a href="/usagerealtime">实时用量</a>
+      <a href="/usagecnusersearch">CN用量查询</a>
+    </div>
+  </div>
+  <div class="container">
+    <div class="card">
+      <h2>站点列表</h2>
+      <span class="hint">集中保存在服务器(sites.json，不进代码仓库)。所有页面从这里取站点。usagecnsearch 默认使用名称为 <b>CN</b> 的站点。已设置的密码不会回显——留空表示不修改。</span>
+      <table class="cfg">
+        <thead>
+          <tr>
+            <th class="col-name">站点名称</th>
+            <th class="col-url">BaseURL</th>
+            <th class="col-mail">管理员邮箱</th>
+            <th class="col-pwd">管理员密码</th>
+            <th class="col-op">操作</th>
+          </tr>
+        </thead>
+        <tbody id="cfgBody"></tbody>
+      </table>
+      <div class="actions">
+        <button class="btn btn-ghost" id="addRow" type="button">+ 添加站点</button>
+        <button class="btn btn-primary" id="saveBtn" type="button">保存</button>
+        <span class="meta" id="metaInfo"></span>
+      </div>
+      <div class="err-banner" id="errBanner"></div>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+  ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+function makeRow(s) {
+  s = s || { name: "", base_url: "", email: "", has_password: false };
+  const tr = document.createElement("tr");
+  tr.innerHTML =
+    '<td><input class="f-name" type="text" placeholder="如 CN" value="' + esc(s.name) + '"></td>' +
+    '<td><input class="f-url" type="text" placeholder="https://api.example.com" value="' + esc(s.base_url) + '"></td>' +
+    '<td><input class="f-mail" type="text" placeholder="admin@example.com" value="' + esc(s.email) + '"></td>' +
+    '<td><input class="f-pwd" type="password" autocomplete="new-password" placeholder="' +
+      (s.has_password ? "已设置，留空不改" : "管理员密码") + '"></td>' +
+    '<td>' +
+      '<button class="btn-sm btn-test" type="button">测试</button> ' +
+      '<button class="btn-sm btn-del" type="button">删除</button>' +
+      '<span class="row-status"></span>' +
+    '</td>';
+  tr.querySelector(".btn-del").onclick = () => tr.remove();
+  tr.querySelector(".btn-test").onclick = () => testRow(tr);
+  return tr;
+}
+
+function readRows() {
+  const out = [];
+  $("cfgBody").querySelectorAll("tr").forEach((tr) => {
+    const name = tr.querySelector(".f-name").value.trim();
+    const base_url = tr.querySelector(".f-url").value.trim();
+    const email = tr.querySelector(".f-mail").value.trim();
+    const password = tr.querySelector(".f-pwd").value;
+    if (name || base_url || email || password) {
+      out.push({ name, base_url, email, password });
+    }
+  });
+  return out;
+}
+
+function setRowStatus(tr, text, cls) {
+  const el = tr.querySelector(".row-status");
+  el.textContent = text;
+  el.className = "row-status " + (cls || "");
+}
+
+async function loadSites() {
+  try {
+    const resp = await fetch("/api/sites");
+    const data = await resp.json();
+    const body = $("cfgBody"); body.innerHTML = "";
+    const sites = (data && data.sites) || [];
+    if (!sites.length) { body.appendChild(makeRow()); }
+    else sites.forEach((s) => body.appendChild(makeRow(s)));
+  } catch (e) {
+    $("cfgBody").appendChild(makeRow());
+  }
+}
+
+async function saveSites() {
+  const eb = $("errBanner"); eb.style.display = "none";
+  const sites = readRows();
+  const names = sites.map((s) => s.name.toLowerCase());
+  if (names.some((n) => !n)) { eb.textContent = "有站点未填名称"; eb.style.display = "block"; return false; }
+  if (new Set(names).size !== names.length) { eb.textContent = "站点名称有重复"; eb.style.display = "block"; return false; }
+  const btn = $("saveBtn"); btn.disabled = true; btn.textContent = "保存中…";
+  try {
+    const resp = await fetch("/api/sites", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sites }),
+    });
+    const data = await resp.json();
+    if (!data.ok) { eb.textContent = data.error || "保存失败"; eb.style.display = "block"; return false; }
+    $("metaInfo").textContent = "已保存 " + (data.count || 0) + " 个站点 · " + new Date().toLocaleTimeString();
+    await loadSites();  // 重新加载，密码框回到「已设置」占位
+    return true;
+  } catch (e) {
+    eb.textContent = "请求失败: " + e; eb.style.display = "block"; return false;
+  } finally {
+    btn.disabled = false; btn.textContent = "保存";
+  }
+}
+
+async function testRow(tr) {
+  const name = tr.querySelector(".f-name").value.trim();
+  if (!name) { setRowStatus(tr, "请先填名称", "bad"); return; }
+  setRowStatus(tr, "保存并测试中…", "muted");
+  const saved = await saveSites();
+  if (!saved) { setRowStatus(tr, "保存失败", "bad"); return; }
+  // saveSites 重新渲染了表格，按名字找回当前行
+  let target = null;
+  $("cfgBody").querySelectorAll("tr").forEach((row) => {
+    if (row.querySelector(".f-name").value.trim().toLowerCase() === name.toLowerCase()) target = row;
+  });
+  if (!target) return;
+  setRowStatus(target, "测试中…", "muted");
+  try {
+    const resp = await fetch("/api/site-test", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await resp.json();
+    if (data.ok) setRowStatus(target, "✓ 登录成功", "ok");
+    else setRowStatus(target, "✗ " + (data.error || "失败"), "bad");
+  } catch (e) {
+    setRowStatus(target, "✗ 请求失败", "bad");
+  }
+}
+
+$("addRow").onclick = () => $("cfgBody").appendChild(makeRow());
+$("saveBtn").onclick = saveSites;
+loadSites();
+</script>
+</body>
+</html>

@@ -1,0 +1,1378 @@
+import asyncio
+import json
+import os
+import threading
+import time
+from datetime import date, datetime, timedelta
+
+import httpx
+
+# sub2api 的 trend 接口返回 'YYYY-MM-DD HH:00'，HH 已经是后端 PG 容器时区下
+# 的小时（实测 ue1-api 的 PG 容器 TZ=Asia/Shanghai，直接给出北京小时；同时
+# 我们在请求里固定传 timezone=Asia/Shanghai，让 sub2api 按北京时区切日界）。
+# 因此这里直接读字符串里的 HH，不做额外时区平移 —— 平移过会把已经是北京时间
+# 的桶再加 8 小时，导致整张图错位。
+from fastapi import FastAPI, Form, Request
+from fastapi.templating import Jinja2Templates
+
+app = FastAPI(title="sub2report", docs_url=None, redoc_url=None)
+templates = Jinja2Templates(directory="templates")
+
+# ---------------- 站点配置中心 (sites.json) ----------------
+# 所有页面用到的站点凭证(站点名/baseURL/管理员邮箱/管理员密码)集中存这里，由
+# /settingsites 界面管理。文件路径用 SITES_FILE 指定，默认 /data/sites.json，
+# 该路径在容器里是一个宿主机 bind mount，重建镜像不丢；且不在代码仓库内，不会被推上 GitHub。
+SITES_FILE = os.getenv("SITES_FILE", "/data/sites.json")
+_sites_lock = threading.Lock()
+
+
+def _load_sites() -> list[dict]:
+    """读取站点配置；文件不存在/损坏都返回 []，绝不抛异常。"""
+    try:
+        with open(SITES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError, OSError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for s in data:
+        if not isinstance(s, dict):
+            continue
+        name = str(s.get("name", "")).strip()
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "base_url": str(s.get("base_url", "")).strip().rstrip("/"),
+            "email": str(s.get("email", "")).strip(),
+            "password": str(s.get("password", "")),
+        })
+    return out
+
+
+def _save_sites(sites: list[dict]) -> None:
+    """原子写入站点配置（先写临时文件再 rename）。"""
+    os.makedirs(os.path.dirname(SITES_FILE) or ".", exist_ok=True)
+    tmp = SITES_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sites, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, SITES_FILE)
+
+
+def _find_site(name: str) -> dict | None:
+    """按站点名大小写不敏感精确匹配，返回完整(含密码)的站点配置。"""
+    target = (name or "").strip().lower()
+    if not target:
+        return None
+    for s in _load_sites():
+        if s["name"].lower() == target:
+            return s
+    return None
+
+
+@app.get("/settingsites")
+async def settingsites_page(request: Request):
+    return templates.TemplateResponse("settingsites.html", {"request": request})
+
+
+@app.get("/api/sites")
+async def get_sites():
+    """列出站点，绝不返回明文密码（只标记是否已设置）。供各页面下拉与配置界面使用。"""
+    sites = [
+        {
+            "name": s["name"],
+            "base_url": s["base_url"],
+            "email": s["email"],
+            "has_password": bool(s["password"]),
+        }
+        for s in _load_sites()
+    ]
+    return {"ok": True, "sites": sites}
+
+
+@app.post("/api/sites")
+async def post_sites(request: Request):
+    """保存整份站点列表。密码留空=沿用同名旧站已存密码（密码只进不出）。"""
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    rows = payload.get("sites") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return {"ok": False, "error": "sites 必须是数组"}
+
+    with _sites_lock:
+        old_by_name = {s["name"].lower(): s for s in _load_sites()}
+        out: list[dict] = []
+        seen: set[str] = set()
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            name = str(r.get("name", "")).strip()
+            if not name:
+                return {"ok": False, "error": "存在空的站点名称"}
+            key = name.lower()
+            if key in seen:
+                return {"ok": False, "error": f"站点名称重复: {name}"}
+            seen.add(key)
+            pwd = str(r.get("password", ""))
+            if not pwd:  # 留空 → 沿用旧密码
+                old = old_by_name.get(key)
+                pwd = old["password"] if old else ""
+            out.append({
+                "name": name,
+                "base_url": str(r.get("base_url", "")).strip().rstrip("/"),
+                "email": str(r.get("email", "")).strip(),
+                "password": pwd,
+            })
+        try:
+            _save_sites(out)
+        except OSError as e:
+            return {"ok": False, "error": f"写入失败: {e}"}
+    return {"ok": True, "count": len(out)}
+
+
+@app.post("/api/site-test")
+async def post_site_test(request: Request):
+    """用某个已配置站点的凭证试登一次，验证可用性。"""
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    name = str((payload or {}).get("name", "")).strip()
+    site = _find_site(name)
+    if not site:
+        return {"ok": False, "error": f"未找到站点: {name}"}
+    if not site["base_url"] or not site["email"] or not site["password"]:
+        return {"ok": False, "error": "站点信息不完整(地址/邮箱/密码)"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            await _login(client, site["base_url"], site["email"], site["password"])
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+MAX_PARALLEL = 4  # per-request concurrency cap when fanning out per-model trend queries
+MODEL_HARD_CAP = 30  # safety net; if a day has more models than this, the tail is dropped
+OBS_TTL = 25  # seconds; covers a 30s auto-refresh cycle
+CMP_TTL = 30 * 60  # historical day rarely changes
+MODELS_TTL = 60  # day-level model list — same day still appends, refresh once a minute
+
+
+def _yesterday() -> str:
+    return (date.today() - timedelta(days=1)).isoformat()
+
+
+@app.get("/usagerealtime")
+async def index(request: Request):
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "today": date.today().isoformat(),
+            "yesterday": _yesterday(),
+        },
+    )
+
+
+# ---------------- tiny TTL cache (key -> (expires_at, payload)) ----------------
+_CACHE: dict[tuple, tuple[float, object]] = {}
+
+
+def _cache_get(key: tuple):
+    item = _CACHE.get(key)
+    if not item:
+        return None
+    exp, val = item
+    if exp < time.time():
+        _CACHE.pop(key, None)
+        return None
+    return val
+
+
+def _cache_set(key: tuple, val, ttl: float):
+    _CACHE[key] = (time.time() + ttl, val)
+
+
+# ---------------- sub2api client helpers ----------------
+async def _login(client: httpx.AsyncClient, base_url: str, email: str, password: str) -> str:
+    resp = await client.post(
+        f"{base_url}/api/v1/auth/login",
+        json={"email": email, "password": password},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        detail = ""
+        try:
+            detail = resp.json().get("message", "")
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Login failed ({resp.status_code}): {detail or 'check email/password'}"
+        )
+    data = resp.json().get("data", resp.json())
+    jwt = data.get("access_token")
+    if not jwt:
+        raise RuntimeError("Login response missing access_token")
+    return jwt
+
+
+async def _find_user_id(client: httpx.AsyncClient, base_url: str, jwt: str, email: str) -> int | None:
+    resp = await client.get(
+        f"{base_url}/api/v1/admin/users",
+        headers={"Authorization": f"Bearer {jwt}"},
+        params={"search": email, "page": 1, "page_size": 20},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        return None
+    data = resp.json().get("data", resp.json())
+    users = data.get("items", data.get("users", data.get("list", [])))
+    if isinstance(users, dict):
+        users = users.get("items", users.get("list", []))
+    # exact match first
+    for u in users:
+        if (u.get("email") or "").lower() == email.lower():
+            return u.get("id")
+    return None
+
+
+async def _get_models(
+    client: httpx.AsyncClient, base_url: str, jwt: str, day: str, user_id: int | None
+) -> list[dict]:
+    """Returns model stats for the day, sorted by total_tokens desc. Cheap: uses
+    dashboard/models which aggregates over usage_logs by day (already indexed by created_at)."""
+    params = {"start_date": day, "end_date": day, "timezone": "Asia/Shanghai"}
+    if user_id:
+        params["user_id"] = user_id
+    resp = await client.get(
+        f"{base_url}/api/v1/admin/dashboard/models",
+        headers={"Authorization": f"Bearer {jwt}"},
+        params=params,
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        return []
+    body = resp.json()
+    data = body.get("data", body)
+    models = data.get("models", []) or []
+    # sort desc by total tokens
+    def _tot(m):
+        if m.get("total_tokens") is not None:
+            return m["total_tokens"]
+        return (
+            (m.get("input_tokens", 0) or 0)
+            + (m.get("output_tokens", 0) or 0)
+            + (m.get("cache_creation_tokens", 0) or 0)
+            + (m.get("cache_read_tokens", 0) or 0)
+        )
+    models.sort(key=_tot, reverse=True)
+    return models
+
+
+async def _get_trend(
+    client: httpx.AsyncClient,
+    base_url: str,
+    jwt: str,
+    day: str,
+    user_id: int | None,
+    model: str | None,
+) -> list[dict]:
+    """Hourly trend for a day, optionally filtered by model. Without model filter
+    this hits the pre-aggregated usage_dashboard_hourly table (cheap).
+    With model filter it scans usage_logs but the WHERE is (created_at, model)
+    over a single day — small range."""
+    params: dict = {"start_date": day, "end_date": day, "granularity": "hour", "timezone": "Asia/Shanghai"}
+    if user_id:
+        params["user_id"] = user_id
+    if model:
+        params["model"] = model
+    resp = await client.get(
+        f"{base_url}/api/v1/admin/dashboard/trend",
+        headers={"Authorization": f"Bearer {jwt}"},
+        params=params,
+        timeout=20,
+    )
+    if resp.status_code != 200:
+        return []
+    body = resp.json()
+    data = body.get("data", body)
+    return data.get("trend", []) or []
+
+
+# ---------------- bucketing ----------------
+def _hour_of(date_str: str) -> int | None:
+    """Parse sub2api's hour-bucket date string ('YYYY-MM-DD HH:00') and return
+    the hour. We don't reinterpret the timezone — the backend has already
+    bucketed by its configured TZ (Asia/Shanghai for ue1-api), and we ask for
+    timezone=Asia/Shanghai when calling /trend so the day boundaries match."""
+    if not date_str:
+        return None
+    s = date_str.replace("T", " ").strip()
+    try:
+        return int(s.split(" ")[1][:2])
+    except (IndexError, ValueError):
+        return None
+
+
+def _zero_hours() -> list[int]:
+    return [0] * 24
+
+
+def _zero_hours_f() -> list[float]:
+    return [0.0] * 24
+
+
+def _trend_to_hours(trend: list[dict]) -> dict[str, list]:
+    """Convert a trend list into per-metric 24-slot arrays."""
+    out: dict[str, list] = {
+        "total_tokens": _zero_hours(),
+        "input_tokens": _zero_hours(),
+        "output_tokens": _zero_hours(),
+        "cache_creation_tokens": _zero_hours(),
+        "cache_read_tokens": _zero_hours(),
+        "requests": _zero_hours(),
+        "cost": _zero_hours_f(),
+        "actual_cost": _zero_hours_f(),
+    }
+    for p in trend:
+        h = _hour_of(p.get("date", ""))
+        if h is None or not (0 <= h <= 23):
+            continue
+        for k in out.keys():
+            v = p.get(k, 0) or 0
+            out[k][h] = v
+    # Ensure total_tokens has a value even if API didn't return it.
+    for h in range(24):
+        if out["total_tokens"][h] == 0 and (
+            out["input_tokens"][h] or out["output_tokens"][h]
+            or out["cache_creation_tokens"][h] or out["cache_read_tokens"][h]
+        ):
+            out["total_tokens"][h] = (
+                out["input_tokens"][h]
+                + out["output_tokens"][h]
+                + out["cache_creation_tokens"][h]
+                + out["cache_read_tokens"][h]
+            )
+    return out
+
+
+# ---------------- day-level fetch with caching + concurrency cap ----------------
+async def _fetch_day_stacked(
+    client: httpx.AsyncClient,
+    base_url: str,
+    jwt: str,
+    day: str,
+    user_id: int | None,
+    sem: asyncio.Semaphore,
+    ttl: float,
+) -> dict:
+    """Fetch a day's per-model hourly breakdown, top-K + 'other'.
+
+    Returns:
+        {
+          "models": [<modelName1>, ..., "其他"],  # legend order
+          "by_model": { modelName: {metric: [24 ints]} },  # includes "其他"
+          "total": {metric: [24 ints]},  # unfiltered hourly total for the day
+        }
+
+    Caches by (base_url, day, user_id) so a 30s auto-refresh against the
+    observation day reuses the result within TTL; the comparison day stays
+    cached for 30 min by the caller's larger ttl.
+    """
+    cache_key = ("stacked", base_url, day, user_id or 0)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # 1) Pull model list for the day (cheap, daily aggregation, cached separately)
+    models_key = ("models", base_url, day, user_id or 0)
+    models = _cache_get(models_key)
+    if models is None:
+        models = await _get_models(client, base_url, jwt, day, user_id)
+        _cache_set(models_key, models, MODELS_TTL)
+
+    model_names = [m.get("model") for m in models if m.get("model")][:MODEL_HARD_CAP]
+
+    # 2) Fetch hourly trend for each model in parallel (bounded). Also fetch the
+    #    un-filtered hourly total separately because that one hits the
+    #    pre-aggregated table (basically free) and is handy for summaries.
+    async def _bounded(coro):
+        async with sem:
+            return await coro
+
+    tasks = [_bounded(_get_trend(client, base_url, jwt, day, user_id, None))]
+    for m in model_names:
+        tasks.append(_bounded(_get_trend(client, base_url, jwt, day, user_id, m)))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _safe(r):
+        return r if isinstance(r, list) else []
+
+    total_hours = _trend_to_hours(_safe(results[0]))
+    by_model: dict[str, dict] = {}
+    for i, m in enumerate(model_names, start=1):
+        by_model[m] = _trend_to_hours(_safe(results[i]))
+
+    payload = {"models": model_names, "by_model": by_model, "total": total_hours}
+    _cache_set(cache_key, payload, ttl)
+    return payload
+
+
+# ---------------- main endpoint ----------------
+@app.post("/api/report")
+async def post_report(
+    site: str = Form(...),
+    target_email: str = Form(""),
+    observation_date: str = Form(...),
+    comparison_date: str = Form(...),
+    refresh_observation_only: str = Form(""),
+):
+    for d in (observation_date, comparison_date):
+        try:
+            datetime.strptime(d, "%Y-%m-%d")
+        except ValueError:
+            return {"error": "Invalid date format, use YYYY-MM-DD"}
+
+    st = _find_site(site)
+    if not st:
+        return {"error": f"未找到站点: {site}"}
+    base_url = st["base_url"]
+    email = st["email"]
+    password = st["password"]
+    if not base_url or not email or not password:
+        return {"error": f"站点「{site}」信息不完整(地址/邮箱/密码)"}
+    target_email = target_email.strip()
+    only_obs = refresh_observation_only.lower() in ("1", "true", "yes")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        try:
+            jwt = await _login(client, base_url, email, password)
+        except RuntimeError as e:
+            return {"error": str(e)}
+
+        user_id = None
+        target_user = {"email": "全部用户"}
+        if target_email:
+            try:
+                uid = await _find_user_id(client, base_url, jwt, target_email)
+            except Exception:
+                uid = None
+            if uid is None:
+                return {"error": f"User not found: {target_email}"}
+            user_id = uid
+            target_user = {"email": target_email, "id": uid}
+
+        sem = asyncio.Semaphore(MAX_PARALLEL)
+
+        try:
+            if only_obs:
+                obs = await _fetch_day_stacked(
+                    client, base_url, jwt, observation_date, user_id, sem, OBS_TTL
+                )
+                cmp_ = None
+            else:
+                obs, cmp_ = await asyncio.gather(
+                    _fetch_day_stacked(
+                        client, base_url, jwt, observation_date, user_id, sem, OBS_TTL
+                    ),
+                    _fetch_day_stacked(
+                        client, base_url, jwt, comparison_date, user_id, sem, CMP_TTL
+                    ),
+                )
+        except Exception as e:
+            return {"error": f"Request failed: {str(e)}"}
+
+    payload = {
+        "base_url": base_url,
+        "observation_date": observation_date,
+        "comparison_date": comparison_date,
+        "target_user": target_user,
+        "observation": obs,
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+    }
+    if cmp_ is not None:
+        payload["comparison"] = cmp_
+    return payload
+
+
+# ============================================================================
+# 聚合运维监控 (aggregate ops dashboard)
+# 输入 N 个站点 (base_url + admin email/password)，并发调用各站
+# /api/v1/admin/ops/dashboard/overview，把运维指标汇总成每站一行。
+# ============================================================================
+
+OPS_TTL = 25  # 秒；配合前端 30s 自动刷新，避免重复打同一个站
+OPS_MAX_PARALLEL = 10  # 同时查询的站点数上限
+
+
+def _num(v):
+    """Return a finite number or None (mirrors the frontend's typeof===number guard)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        if f != f or f in (float("inf"), float("-inf")):
+            return None
+        return v
+    return None
+
+
+def _flatten_overview(ov: dict) -> dict:
+    """Extract the metrics we render from an OpsDashboardOverview payload.
+    Every field is .get()-guarded; missing -> None so the UI shows '-'."""
+    sm = ov.get("system_metrics") or {}
+    qps = ov.get("qps") or {}
+    tps = ov.get("tps") or {}
+    ttft = ov.get("ttft") or {}
+    duration = ov.get("duration") or {}
+    jobs = ov.get("job_heartbeats") or []
+
+    # job 摘要：统计最近一次结果为失败/有 last_error 的任务
+    job_total = len(jobs)
+    job_failed = 0
+    failed_names = []
+    for j in jobs:
+        res = (j.get("last_result") or "").lower()
+        has_err = bool(j.get("last_error"))
+        if res in ("error", "failed", "failure") or (has_err and res not in ("success", "ok")):
+            job_failed += 1
+            if j.get("job_name"):
+                failed_names.append(j.get("job_name"))
+
+    sla = _num(ov.get("sla"))
+    error_rate = _num(ov.get("error_rate"))
+    upstream_error_rate = _num(ov.get("upstream_error_rate"))
+    qps_current = _num(qps.get("current"))
+
+    return {
+        "health_score": _num(ov.get("health_score")),
+        # idle：QPS=0 且 error_rate=0 → 前端原版判定系统空闲（健康分显示灰）
+        "idle": (qps_current or 0) == 0 and (error_rate or 0) == 0,
+        # system
+        "cpu_usage_percent": _num(sm.get("cpu_usage_percent")),
+        "memory_usage_percent": _num(sm.get("memory_usage_percent")),
+        "memory_used_mb": _num(sm.get("memory_used_mb")),
+        "memory_total_mb": _num(sm.get("memory_total_mb")),
+        "db_ok": sm.get("db_ok"),
+        "redis_ok": sm.get("redis_ok"),
+        "db_conn_active": _num(sm.get("db_conn_active")),
+        "db_conn_idle": _num(sm.get("db_conn_idle")),
+        "db_conn_waiting": _num(sm.get("db_conn_waiting")),
+        "db_max_open_conns": _num(sm.get("db_max_open_conns")),
+        "redis_conn_total": _num(sm.get("redis_conn_total")),
+        "redis_conn_idle": _num(sm.get("redis_conn_idle")),
+        "redis_pool_size": _num(sm.get("redis_pool_size")),
+        "goroutine_count": _num(sm.get("goroutine_count")),
+        "concurrency_queue_depth": _num(sm.get("concurrency_queue_depth")),
+        "account_switch_count": _num(sm.get("account_switch_count")),
+        # jobs
+        "job_total": job_total,
+        "job_failed": job_failed,
+        "job_failed_names": failed_names[:5],
+        # traffic
+        "qps_current": qps_current,
+        "qps_peak": _num(qps.get("peak")),
+        "tps_current": _num(tps.get("current")),
+        "tps_peak": _num(tps.get("peak")),
+        # counts
+        "request_count_total": _num(ov.get("request_count_total")),
+        "success_count": _num(ov.get("success_count")),
+        "error_count_total": _num(ov.get("error_count_total")),
+        "token_consumed": _num(ov.get("token_consumed")),
+        # rates (0~1 小数，前端 ×100 成百分比)
+        "sla": sla,
+        "sla_percent": None if sla is None else sla * 100,
+        "error_rate": error_rate,
+        "error_rate_percent": None if error_rate is None else error_rate * 100,
+        "upstream_error_rate": upstream_error_rate,
+        "upstream_error_rate_percent": None if upstream_error_rate is None else upstream_error_rate * 100,
+        "upstream_error_count_excl_429_529": _num(ov.get("upstream_error_count_excl_429_529")),
+        "upstream_429_count": _num(ov.get("upstream_429_count")),
+        "upstream_529_count": _num(ov.get("upstream_529_count")),
+        # latency
+        "ttft_p99_ms": _num(ttft.get("p99_ms")),
+        "ttft_p95_ms": _num(ttft.get("p95_ms")),
+        "ttft_p50_ms": _num(ttft.get("p50_ms")),
+        "duration_p99_ms": _num(duration.get("p99_ms")),
+        "duration_p50_ms": _num(duration.get("p50_ms")),
+    }
+
+
+async def _fetch_station_ops(
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+    name: str,
+    base_url: str,
+    email: str,
+    password: str,
+    time_range: str = "1h",
+) -> dict:
+    """Login + fetch ops overview for one station. Never raises; failures are
+    returned as {ok: False, error: ...} so one bad station can't sink the batch."""
+    base_url = (base_url or "").strip().rstrip("/")
+    name = (name or "").strip() or base_url
+    result = {"name": name, "base_url": base_url, "ok": False}
+
+    if not base_url:
+        result["error"] = "缺少站点地址"
+        return result
+
+    cache_key = ("ops", base_url, email, time_range)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        out = dict(cached)
+        out["name"] = name  # 名称以本次请求为准
+        out["cached"] = True
+        return out
+
+    async with sem:
+        try:
+            jwt = await _login(client, base_url, email, password)
+        except RuntimeError as e:
+            result["error"] = str(e)
+            return result
+        except Exception as e:
+            result["error"] = f"登录异常: {e}"
+            return result
+
+        try:
+            resp = await client.get(
+                f"{base_url}/api/v1/admin/ops/dashboard/overview",
+                headers={"Authorization": f"Bearer {jwt}"},
+                params={"time_range": time_range},
+                timeout=20,
+            )
+        except Exception as e:
+            result["error"] = f"请求 overview 失败: {e}"
+            return result
+
+    if resp.status_code != 200:
+        detail = ""
+        try:
+            detail = resp.json().get("message", "")
+        except Exception:
+            detail = (resp.text or "")[:200]
+        result["error"] = f"overview 返回 {resp.status_code}: {detail or '可能未启用运维监控'}"
+        return result
+
+    try:
+        body = resp.json()
+    except Exception as e:
+        result["error"] = f"解析 overview JSON 失败: {e}"
+        return result
+
+    ov = body.get("data", body)
+    if not isinstance(ov, dict):
+        result["error"] = "overview 数据格式异常"
+        return result
+
+    result["ok"] = True
+    result["metrics"] = _flatten_overview(ov)
+    _cache_set(cache_key, result, OPS_TTL)
+    return result
+
+
+@app.get("/opsdingdongding")
+async def ops_page(request: Request):
+    return templates.TemplateResponse("ops.html", {"request": request})
+
+
+@app.post("/api/ops-aggregate")
+async def post_ops_aggregate(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"error": "请求体必须是 JSON"}
+
+    # names 省略或为空 → 查全部已配置站点；否则按名筛选（保持给定顺序）
+    names = payload.get("names") if isinstance(payload, dict) else None
+    all_sites = _load_sites()
+    if isinstance(names, list) and names:
+        wanted = [str(n).strip().lower() for n in names if str(n).strip()]
+        by_name = {s["name"].lower(): s for s in all_sites}
+        stations = [by_name[n] for n in wanted if n in by_name]
+    else:
+        stations = all_sites
+    if not stations:
+        return {"error": "未配置任何站点，请先到「站点配置」添加"}
+    stations = stations[:50]  # hard cap
+
+    time_range = str(payload.get("time_range", "1h")).strip() or "1h"
+    if time_range not in ("5m", "30m", "1h", "6h", "24h"):
+        time_range = "1h"
+
+    sem = asyncio.Semaphore(OPS_MAX_PARALLEL)
+    async with httpx.AsyncClient(timeout=25) as client:
+        tasks = [
+            _fetch_station_ops(
+                client,
+                sem,
+                s["name"],
+                s["base_url"],
+                s["email"],
+                s["password"],
+                time_range,
+            )
+            for s in stations
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    out = []
+    for r in results:
+        if isinstance(r, dict):
+            out.append(r)
+        else:
+            out.append({"name": "?", "base_url": "", "ok": False, "error": f"内部错误: {r}"})
+
+    return {
+        "stations": out,
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+# ============================================================================
+# 单站运维明细 (on-demand drill-down)
+# 前端点开某一行才调用，按平台并发/吞吐趋势/时长分布/错误分布/请求错误Top20/
+# 上游错误Top20。默认时间窗口 1h。短 TTL 缓存，避免重复点击重复打站。
+# ============================================================================
+
+DETAIL_TTL = 60  # 秒；明细面板手动点开，缓存 60s 即可
+DETAIL_TOPN = 20  # 错误明细条数
+
+
+def _unwrap(body):
+    """sub2api 统一响应 {code,message,data}，取 data；非包裹结构原样返回。"""
+    if isinstance(body, dict) and "data" in body:
+        return body.get("data")
+    return body
+
+
+async def _get_json(client, base_url, jwt, path, params=None):
+    """GET 一个 admin 接口，返回 (ok, data_or_errmsg)。不抛异常。"""
+    try:
+        resp = await client.get(
+            f"{base_url}{path}",
+            headers={"Authorization": f"Bearer {jwt}"},
+            params=params or {},
+            timeout=20,
+        )
+    except Exception as e:
+        return False, f"{path} 请求异常: {e}"
+    if resp.status_code != 200:
+        detail = ""
+        try:
+            detail = resp.json().get("message", "")
+        except Exception:
+            detail = (resp.text or "")[:120]
+        return False, f"{path} 返回 {resp.status_code}: {detail}"
+    try:
+        return True, _unwrap(resp.json())
+    except Exception as e:
+        return False, f"{path} JSON 解析失败: {e}"
+
+
+def _items_of(data):
+    """分页响应 data 为 {items,total,...}；取 items 列表。"""
+    if isinstance(data, dict):
+        items = data.get("items")
+        if isinstance(items, list):
+            return items
+    if isinstance(data, list):
+        return data
+    return []
+
+
+async def _fetch_station_detail(
+    client: httpx.AsyncClient,
+    name: str,
+    base_url: str,
+    email: str,
+    password: str,
+    time_range: str,
+) -> dict:
+    """登录 + 并发拉取一个站的全部明细接口。单接口失败不影响其他接口。"""
+    base_url = (base_url or "").strip().rstrip("/")
+    name = (name or "").strip() or base_url
+    result = {"name": name, "base_url": base_url, "ok": False}
+    if not base_url:
+        result["error"] = "缺少站点地址"
+        return result
+
+    cache_key = ("ops_detail", base_url, email, time_range)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        out = dict(cached)
+        out["name"] = name
+        out["cached"] = True
+        return out
+
+    try:
+        jwt = await _login(client, base_url, email, password)
+    except RuntimeError as e:
+        result["error"] = str(e)
+        return result
+    except Exception as e:
+        result["error"] = f"登录异常: {e}"
+        return result
+
+    tr = {"time_range": time_range}
+    paged = {"time_range": time_range, "page": 1, "page_size": DETAIL_TOPN}
+
+    (
+        (c_ok, c_data),
+        (t_ok, t_data),
+        (l_ok, l_data),
+        (e_ok, e_data),
+        (re_ok, re_data),
+        (ue_ok, ue_data),
+    ) = await asyncio.gather(
+        _get_json(client, base_url, jwt, "/api/v1/admin/ops/concurrency"),
+        _get_json(client, base_url, jwt, "/api/v1/admin/ops/dashboard/throughput-trend", tr),
+        _get_json(client, base_url, jwt, "/api/v1/admin/ops/dashboard/latency-histogram", tr),
+        _get_json(client, base_url, jwt, "/api/v1/admin/ops/dashboard/error-distribution", tr),
+        _get_json(client, base_url, jwt, "/api/v1/admin/ops/request-errors", paged),
+        _get_json(client, base_url, jwt, "/api/v1/admin/ops/upstream-errors", paged),
+    )
+
+    # 按平台并发/排队：data.platform 是 {platform: info} 映射
+    concurrency = []
+    if c_ok and isinstance(c_data, dict):
+        plat = c_data.get("platform") or {}
+        if isinstance(plat, dict):
+            for p, info in plat.items():
+                if isinstance(info, dict):
+                    concurrency.append({
+                        "platform": info.get("platform") or p,
+                        "current_in_use": info.get("current_in_use"),
+                        "max_capacity": info.get("max_capacity"),
+                        "load_percentage": info.get("load_percentage"),
+                        "waiting_in_queue": info.get("waiting_in_queue"),
+                    })
+        concurrency.sort(key=lambda x: (x.get("waiting_in_queue") or 0, x.get("current_in_use") or 0), reverse=True)
+
+    # 按平台吞吐：data.by_platform
+    throughput = []
+    if t_ok and isinstance(t_data, dict):
+        bp = t_data.get("by_platform") or []
+        if isinstance(bp, list):
+            for it in bp:
+                if isinstance(it, dict):
+                    throughput.append({
+                        "platform": it.get("platform"),
+                        "request_count": it.get("request_count"),
+                        "token_consumed": it.get("token_consumed"),
+                    })
+        throughput.sort(key=lambda x: (x.get("request_count") or 0), reverse=True)
+
+    # 时长分布直方图：data.buckets [{range,count}]
+    latency = []
+    if l_ok and isinstance(l_data, dict):
+        for b in (l_data.get("buckets") or []):
+            if isinstance(b, dict):
+                latency.append({"range": b.get("range"), "count": b.get("count")})
+
+    # 错误分布：data.items [{status_code,total,sla,business_limited}]
+    err_dist = []
+    if e_ok and isinstance(e_data, dict):
+        for it in (e_data.get("items") or []):
+            if isinstance(it, dict):
+                err_dist.append({
+                    "status_code": it.get("status_code"),
+                    "total": it.get("total"),
+                    "sla": it.get("sla"),
+                    "business_limited": it.get("business_limited"),
+                })
+        err_dist.sort(key=lambda x: (x.get("total") or 0), reverse=True)
+
+    def _err_rows(ok, data):
+        rows = []
+        if not ok:
+            return rows
+        for it in _items_of(data)[:DETAIL_TOPN]:
+            if not isinstance(it, dict):
+                continue
+            rows.append({
+                "id": it.get("id"),
+                "created_at": it.get("created_at"),
+                "status_code": it.get("status_code"),
+                "phase": it.get("phase"),
+                "type": it.get("type"),
+                "error_source": it.get("error_source"),
+                "severity": it.get("severity"),
+                "platform": it.get("platform"),
+                "model": it.get("requested_model") or it.get("model") or it.get("upstream_model"),
+                "account_name": it.get("account_name"),
+                "user_email": it.get("user_email"),
+                "message": it.get("message"),
+            })
+        return rows
+
+    detail = {
+        "time_range": time_range,
+        "concurrency": concurrency,
+        "throughput": throughput,
+        "latency": latency,
+        "error_distribution": err_dist,
+        "request_errors": _err_rows(re_ok, re_data),
+        "upstream_errors": _err_rows(ue_ok, ue_data),
+        "errors": {  # 各子接口若失败，把错误文案带回前端提示
+            k: v for k, v in {
+                "concurrency": None if c_ok else c_data,
+                "throughput": None if t_ok else t_data,
+                "latency": None if l_ok else l_data,
+                "error_distribution": None if e_ok else e_data,
+                "request_errors": None if re_ok else re_data,
+                "upstream_errors": None if ue_ok else ue_data,
+            }.items() if v
+        },
+    }
+
+    result["ok"] = True
+    result["detail"] = detail
+    _cache_set(cache_key, result, DETAIL_TTL)
+    return result
+
+
+@app.post("/api/ops-detail")
+async def post_ops_detail(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"error": "请求体必须是 JSON"}
+    if not isinstance(payload, dict):
+        return {"error": "请求体格式错误"}
+
+    name = str(payload.get("name", "")).strip()
+    st = _find_site(name)
+    if not st:
+        return {"error": f"未找到站点: {name}"}
+    if not st["base_url"]:
+        return {"error": "缺少站点地址"}
+    time_range = str(payload.get("time_range", "1h")).strip() or "1h"
+    if time_range not in ("1h", "6h", "24h"):
+        time_range = "1h"
+
+    async with httpx.AsyncClient(timeout=25) as client:
+        res = await _fetch_station_detail(
+            client,
+            st["name"],
+            st["base_url"],
+            st["email"],
+            st["password"],
+            time_range,
+        )
+    res["server_time"] = datetime.now().isoformat(timespec="seconds")
+    return res
+
+
+# ============================================================================
+# 财务收益模型 (/finance)
+# 选定时间段 + 站点 + 用户 -> 拉取该用户每天分平台(GPT/Claude/Gemini)的
+# actual_cost(实际扣除)。后端只返回原始每日分平台消费额 e，收益换算全在前端
+# 做(改百分比参数本地秒算，不重新打 sub2api)。
+# ============================================================================
+
+FINANCE_MAX_DAYS = 92  # 时间跨度上限，避免一次并发打太多天给 sub2api 加压
+FINANCE_TODAY_TTL = 60  # 当天数据仍在累加，缓存 60s
+FINANCE_PAST_TTL = 30 * 60  # 历史日基本不变，缓存 30min
+
+
+def _classify_platform(model: str) -> str | None:
+    """按模型名前缀归类到 gpt/claude/gemini，其余返回 None(忽略)。"""
+    m = (model or "").strip().lower()
+    if not m:
+        return None
+    if m.startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
+        return "gpt"
+    if m.startswith("claude"):
+        return "claude"
+    if m.startswith("gemini"):
+        return "gemini"
+    return None
+
+
+async def _find_user(client: httpx.AsyncClient, base_url: str, jwt: str, ident: str) -> dict | None:
+    """按用户名或邮箱精确匹配用户，返回 {id, username, email}。"""
+    ident = (ident or "").strip()
+    if not ident:
+        return None
+    ok, data = await _get_json(
+        client, base_url, jwt, "/api/v1/admin/users",
+        {"search": ident, "page": 1, "page_size": 50},
+    )
+    if not ok:
+        return None
+    users = _items_of(data)
+    if not users and isinstance(data, dict):
+        users = data.get("users", data.get("list", [])) or []
+    low = ident.lower()
+    for u in users:
+        if not isinstance(u, dict):
+            continue
+        if (u.get("username") or "").lower() == low or (u.get("email") or "").lower() == low:
+            return {"id": u.get("id"), "username": u.get("username"), "email": u.get("email")}
+    return None
+
+
+def _date_range(start: str, end: str) -> list[str]:
+    s = date.fromisoformat(start)
+    e = date.fromisoformat(end)
+    if e < s:
+        s, e = e, s
+    out = []
+    d = s
+    while d <= e:
+        out.append(d.isoformat())
+        d += timedelta(days=1)
+    return out
+
+
+FINANCE_MAX_USERS = 50  # 单次结算用户数上限
+
+
+async def _fetch_user_days(
+    client: httpx.AsyncClient,
+    base_url: str,
+    jwt: str,
+    user_id: int,
+    days: list[str],
+    sem: asyncio.Semaphore,
+) -> list[dict]:
+    """已解析的用户，按天拉取分平台 actual_cost。共用外部 semaphore 限流。"""
+    today_str = date.today().isoformat()
+
+    async def one_day(day: str) -> dict:
+        cache_key = ("finance", base_url, user_id, day)
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+        async with sem:
+            models = await _get_models(client, base_url, jwt, day, user_id)
+        bucket = {"date": day, "gpt": 0.0, "claude": 0.0, "gemini": 0.0}
+        for m in models:
+            plat = _classify_platform(m.get("model", ""))
+            if plat is None:
+                continue
+            try:
+                bucket[plat] += float(m.get("actual_cost", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+        ttl = FINANCE_TODAY_TTL if day >= today_str else FINANCE_PAST_TTL
+        _cache_set(cache_key, bucket, ttl)
+        return bucket
+
+    results = await asyncio.gather(*[one_day(d) for d in days])
+    results.sort(key=lambda r: r["date"])
+    return results
+
+
+async def _fetch_multi_user_daily_platform_cost(
+    client: httpx.AsyncClient,
+    users: list[dict],
+    start: str,
+    end: str,
+) -> dict:
+    """多站点多用户:每个 user 自带所属站点(base_url/email/password)。
+    按 (base_url,email,password) 分组，每个站点只登录一次;再逐用户(各自一行)
+    拉取每天分平台 actual_cost。单站登录失败 / 单用户找不到都只影响相关用户。"""
+    try:
+        days = _date_range(start, end)
+    except Exception:
+        return {"ok": False, "error": "日期格式错误，应为 YYYY-MM-DD"}
+    if not days:
+        return {"ok": False, "error": "时间段为空"}
+    if len(days) > FINANCE_MAX_DAYS:
+        return {"ok": False, "error": f"时间跨度过大({len(days)} 天)，请控制在 {FINANCE_MAX_DAYS} 天内"}
+
+    clean = []
+    for i, u in enumerate(users):
+        if not isinstance(u, dict):
+            continue
+        base_url = str(u.get("base_url", "")).strip().rstrip("/")
+        username = str(u.get("username", "")).strip()
+        if not base_url or not username:
+            continue
+        clean.append({
+            "key": u.get("key", i),
+            "station": str(u.get("station_name", "")).strip() or base_url,
+            "base_url": base_url,
+            "email": str(u.get("email", "")).strip(),
+            "password": str(u.get("password", "")),
+            "username": username,
+        })
+    if not clean:
+        return {"ok": False, "error": "请至少填写一个「站点 + 用户名」"}
+    if len(clean) > FINANCE_MAX_USERS:
+        return {"ok": False, "error": f"用户数过多({len(clean)})，请控制在 {FINANCE_MAX_USERS} 个内"}
+
+    # 每个站点(base_url+email+password)只登录一次
+    station_jwt: dict[tuple, object] = {}
+
+    async def login_station(key: tuple):
+        base_url, email, password = key
+        try:
+            station_jwt[key] = await _login(client, base_url, email, password)
+        except Exception as e:
+            station_jwt[key] = RuntimeError(f"登录失败: {e}")
+
+    uniq = {(u["base_url"], u["email"], u["password"]) for u in clean}
+    await asyncio.gather(*[login_station(k) for k in uniq])
+
+    sem = asyncio.Semaphore(MAX_PARALLEL)  # 全局共享，跨站点×用户×天限流
+
+    async def one_user(u: dict) -> dict:
+        skey = (u["base_url"], u["email"], u["password"])
+        jwt = station_jwt.get(skey)
+        base = {"key": u["key"], "username": u["username"], "station": u["station"]}
+        if isinstance(jwt, Exception) or not jwt:
+            return {**base, "ok": False, "error": str(jwt) if jwt else "登录失败"}
+        user = await _find_user(client, u["base_url"], jwt, u["username"])
+        if not user or not user.get("id"):
+            return {**base, "ok": False, "error": f"未找到用户: {u['username']}"}
+        rows = await _fetch_user_days(client, u["base_url"], jwt, user["id"], days, sem)
+        return {**base, "ok": True, "user": user, "days": rows}
+
+    results = await asyncio.gather(*[one_user(u) for u in clean])
+    return {"ok": True, "results": list(results)}
+
+
+@app.get("/financemodel")
+async def finance_page(request: Request):
+    return templates.TemplateResponse(
+        "finance.html",
+        {
+            "request": request,
+            "today": date.today().isoformat(),
+            "week_ago": (date.today() - timedelta(days=6)).isoformat(),
+        },
+    )
+
+
+@app.post("/api/finance")
+async def post_finance(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "请求体格式错误"}
+
+    users = payload.get("users")
+    if not isinstance(users, list) or not users:
+        return {"ok": False, "error": "请至少填写一个「站点 + 用户名」"}
+    start = str(payload.get("start", "")).strip()
+    end = str(payload.get("end", "")).strip()
+    if not start or not end:
+        return {"ok": False, "error": "缺少时间段"}
+
+    # 浏览器只传 {station_name, username, key}；在服务端按站点名补齐凭证
+    enriched = []
+    for u in users:
+        if not isinstance(u, dict):
+            continue
+        station_name = str(u.get("station_name", "")).strip()
+        st = _find_site(station_name)
+        enriched.append({
+            "key": u.get("key"),
+            "station_name": station_name,
+            "base_url": st["base_url"] if st else "",
+            "email": st["email"] if st else "",
+            "password": st["password"] if st else "",
+            "username": str(u.get("username", "")).strip(),
+        })
+
+    async with httpx.AsyncClient(timeout=25) as client:
+        res = await _fetch_multi_user_daily_platform_cost(client, enriched, start, end)
+    res["server_time"] = datetime.now().isoformat(timespec="seconds")
+    return res
+
+
+# ---------------- CN 用户用量查询(凭证取自站点配置中名为 "CN" 的站点) ----------------
+@app.get("/usagecnusersearch")
+async def usage_cn_search_page(request: Request):
+    return templates.TemplateResponse("usagecnsearch.html", {"request": request})
+
+
+def _cn_site() -> dict | None:
+    """取站点配置里名为 'CN' 的站点（usagecnsearch 默认用它）。"""
+    return _find_site("CN")
+
+
+async def _cn_find_user(client: httpx.AsyncClient, base_url: str, jwt: str, email: str) -> dict | None:
+    resp = await client.get(
+        f"{base_url}/api/v1/admin/users",
+        headers={"Authorization": f"Bearer {jwt}"},
+        params={"search": email, "page": 1, "page_size": 20},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        return None
+    data = resp.json().get("data", resp.json())
+    users = data.get("items", data.get("users", data.get("list", [])))
+    if isinstance(users, dict):
+        users = users.get("items", users.get("list", []))
+    el = email.lower()
+    for u in users:
+        if isinstance(u, dict) and (u.get("email") or "").lower() == el:
+            return u
+    return None
+
+
+@app.post("/api/usage-cn-search")
+async def post_usage_cn_search(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    email = str((payload or {}).get("email", "")).strip()
+    if not email:
+        return {"ok": False, "error": "请输入用户邮箱"}
+
+    site = _cn_site()
+    if not site or not site["base_url"]:
+        return {"ok": False, "error": "未配置名为 CN 的站点，请到「站点配置」添加"}
+    cn_base, cn_email, cn_pass = site["base_url"], site["email"], site["password"]
+
+    async with httpx.AsyncClient(timeout=25) as client:
+        try:
+            jwt = await _login(client, cn_base, cn_email, cn_pass)
+        except Exception as e:
+            return {"ok": False, "error": f"服务暂时不可用: {e}"}
+
+        user = await _cn_find_user(client, cn_base, jwt, email)
+        if not user or not user.get("id"):
+            return {"ok": False, "found": False, "error": f"未找到该用户: {email}"}
+
+        uid = user["id"]
+        today = date.today()
+        days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+        sem = asyncio.Semaphore(MAX_PARALLEL)
+
+        async def one_day(day: str) -> dict:
+            async with sem:
+                models = await _get_models(client, cn_base, jwt, day, uid)
+            cost = 0.0
+            tokens = 0
+            for m in models:
+                try:
+                    cost += float(m.get("actual_cost", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    tokens += int(m.get("total_tokens", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+            return {"date": day, "cost": round(cost, 6), "tokens": tokens}
+
+        rows = await asyncio.gather(*[one_day(d) for d in days])
+        rows = sorted(rows, key=lambda r: r["date"])
+
+    total_cost = round(sum(r["cost"] for r in rows), 6)
+    total_tokens = sum(r["tokens"] for r in rows)
+    try:
+        bal = float(user.get("balance", 0) or 0)
+    except (TypeError, ValueError):
+        bal = 0.0
+    return {
+        "ok": True,
+        "found": True,
+        "email": user.get("email", email),
+        "balance": bal,
+        "days": rows,
+        "total_cost": total_cost,
+        "total_tokens": total_tokens,
+        "today": today.isoformat(),
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+# ---------------- CN 用户充值记录查询(redeem-codes used_by 该用户) ----------------
+@app.post("/api/usage-cn-recharge")
+async def post_usage_cn_recharge(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    email = str((payload or {}).get("email", "")).strip()
+    if not email:
+        return {"ok": False, "error": "请输入用户邮箱"}
+
+    site = _cn_site()
+    if not site or not site["base_url"]:
+        return {"ok": False, "error": "未配置名为 CN 的站点，请到「站点配置」添加"}
+    cn_base, cn_email, cn_pass = site["base_url"], site["email"], site["password"]
+
+    async with httpx.AsyncClient(timeout=25) as client:
+        try:
+            jwt = await _login(client, cn_base, cn_email, cn_pass)
+        except Exception as e:
+            return {"ok": False, "error": f"服务暂时不可用: {e}"}
+
+        user = await _cn_find_user(client, cn_base, jwt, email)
+        if not user or not user.get("id"):
+            return {"ok": False, "found": False, "error": f"未找到该用户: {email}"}
+
+        uid = user["id"]
+        headers = {"Authorization": f"Bearer {jwt}"}
+        # used_by/user_id 过滤被后端忽略,只能拉全部已使用的兑换码后本地按 used_by 过滤
+        matched: list[dict] = []
+        page = 1
+        page_size = 100
+        while page <= 50:
+            try:
+                resp = await client.get(
+                    f"{cn_base}/api/v1/admin/redeem-codes",
+                    headers=headers,
+                    params={"status": "used", "page": page, "page_size": page_size},
+                    timeout=15,
+                )
+            except Exception:
+                break
+            if resp.status_code != 200:
+                break
+            data = resp.json().get("data", {}) or {}
+            items = data.get("items", []) or []
+            for it in items:
+                if it.get("used_by") == uid:
+                    matched.append(it)
+            pages = data.get("pages") or 1
+            if page >= pages or not items:
+                break
+            page += 1
+
+        def _sort_key(it: dict):
+            return str(it.get("used_at") or it.get("created_at") or "")
+
+        matched.sort(key=_sort_key, reverse=True)
+        recent = matched[:7]
+
+        records = []
+        for it in recent:
+            try:
+                amount = float(it.get("value", 0) or 0)
+            except (TypeError, ValueError):
+                amount = 0.0
+            records.append({
+                "amount": amount,
+                "time": it.get("used_at") or it.get("created_at") or "",
+                "type": it.get("type") or "",
+            })
+
+    try:
+        bal = float(user.get("balance", 0) or 0)
+    except (TypeError, ValueError):
+        bal = 0.0
+    return {
+        "ok": True,
+        "found": True,
+        "email": user.get("email", email),
+        "balance": bal,
+        "records": records,
+        "count": len(records),
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+    }

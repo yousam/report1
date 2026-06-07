@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>用户用量/充值记录查询</title>
+<style>
+  :root { --bd:#e4e7ed; --mut:#909399; --pri:#409eff; --danger:#e6433c; --ok:#1f9550; --bg:#f5f7fa; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:var(--bg); color:#303133; -webkit-text-size-adjust:100%; }
+  .wrap { max-width:760px; margin:0 auto; padding:20px 16px 48px; }
+  h1 { font-size:20px; margin:8px 0 16px; }
+  .card { background:#fff; border:1px solid var(--bd); border-radius:10px; padding:18px 16px; margin-bottom:16px;
+          box-shadow:0 1px 2px rgba(0,0,0,.03); }
+  .search { display:flex; flex-direction:column; gap:10px; }
+  .search input { width:100%; padding:11px 12px; font-size:15px; border:1px solid var(--bd);
+                  border-radius:8px; outline:none; }
+  .search input:focus { border-color:var(--pri); }
+  .search .btns { display:flex; gap:10px; }
+  .search button { flex:1 1 0; padding:11px 22px; font-size:15px; color:#fff; border:none;
+                   border-radius:8px; cursor:pointer; }
+  .search button.usage { background:var(--pri); }
+  .search button.recharge { background:var(--danger); }
+  .search button:disabled { opacity:.6; cursor:not-allowed; }
+  .card-title { font-size:16px; font-weight:600; margin:0 0 12px; padding-bottom:10px;
+                border-bottom:1px solid var(--bd); }
+  .card-title.usage { color:var(--pri); }
+  .card-title.recharge { color:var(--danger); }
+  .hist { margin-top:14px; }
+  .hist-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  .hist-head .lbl { font-size:12px; color:var(--mut); }
+  .hist-head .clear { font-size:12px; color:var(--mut); background:none; border:none; cursor:pointer; padding:2px 4px; }
+  .hist-head .clear:hover { color:#c45656; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
+  .chip { display:inline-flex; align-items:center; gap:6px; max-width:100%; font-size:13px; color:#475669;
+          background:#f4f6f9; border:1px solid var(--bd); border-radius:16px; padding:5px 6px 5px 12px; }
+  .chip .txt { cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:200px; }
+  .chip .x { cursor:pointer; width:16px; height:16px; line-height:15px; text-align:center; border-radius:50%;
+             color:var(--mut); font-size:13px; }
+  .chip .x:hover { background:#e0e3e8; color:#c45656; }
+  .msg { padding:12px 14px; border-radius:8px; font-size:14px; margin-top:4px; }
+  .msg.err { background:#fef0f0; color:#c45656; }
+  .msg.info { background:#f4f4f5; color:var(--mut); }
+  .summary { display:flex; gap:12px; flex-wrap:wrap; }
+  .stat { flex:1 1 150px; background:#fafafa; border:1px solid var(--bd); border-radius:8px; padding:14px; }
+  .stat .lbl { font-size:12px; color:var(--mut); margin-bottom:6px; }
+  .stat .val { font-size:22px; font-weight:600; word-break:break-all; }
+  .stat .val.bal { color:var(--ok); }
+  .email-line { font-size:14px; color:var(--mut); margin:0 0 14px; word-break:break-all; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th,td { padding:10px 8px; text-align:right; border-bottom:1px solid #f0f0f0; }
+  th:first-child,td:first-child { text-align:left; }
+  thead th { color:var(--mut); font-weight:500; font-size:12px; border-bottom:1px solid var(--bd); }
+  tr.total td { font-weight:600; border-top:2px solid var(--bd); border-bottom:none; }
+  .tag { display:inline-block; font-size:11px; color:var(--pri); background:#ecf5ff; border-radius:4px;
+         padding:1px 6px; margin-left:6px; vertical-align:middle; }
+  .hide { display:none; }
+  .foot { text-align:center; color:#c0c4cc; font-size:12px; margin-top:18px; }
+  @media (max-width:480px){
+    h1{font-size:18px;}
+    .stat .val{font-size:19px;}
+    th,td{padding:9px 5px; font-size:13px;}
+    .chip .txt{max-width:150px;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>用户用量/充值记录查询</h1>
+  <div style="margin:-6px 0 14px;display:flex;gap:14px;font-size:13px;">
+    <a href="/settingsites" style="color:#409eff;text-decoration:none;">站点配置</a>
+    <a href="/opsdingdongding" style="color:#409eff;text-decoration:none;">运维监控</a>
+    <a href="/financemodel" style="color:#409eff;text-decoration:none;">财务模型</a>
+    <a href="/usagerealtime" style="color:#409eff;text-decoration:none;">实时用量</a>
+  </div>
+
+  <div class="card">
+    <div class="search">
+      <input id="email" type="email" inputmode="email" autocomplete="off"
+             placeholder="请输入用户邮箱" />
+      <div class="btns">
+        <button id="btn-recharge" class="recharge">充值记录查询</button>
+        <button id="btn-usage" class="usage">用量查询</button>
+      </div>
+    </div>
+    <div id="msg" class="msg info hide"></div>
+
+    <div id="hist" class="hist hide">
+      <div class="hist-head">
+        <span class="lbl">最近查询</span>
+        <button id="hist-clear" class="clear">清空</button>
+      </div>
+      <div id="chips" class="chips"></div>
+    </div>
+  </div>
+
+  <div id="result" class="card hide">
+    <div class="card-title usage">用量查询</div>
+    <p class="email-line" id="r-email"></p>
+    <div class="summary">
+      <div class="stat">
+        <div class="lbl">当前余额</div>
+        <div class="val bal" id="r-balance">-</div>
+      </div>
+      <div class="stat">
+        <div class="lbl">近7天金额合计</div>
+        <div class="val" id="r-total-cost">-</div>
+      </div>
+      <div class="stat">
+        <div class="lbl">近7天 Token 合计</div>
+        <div class="val" id="r-total-tokens">-</div>
+      </div>
+    </div>
+
+    <table style="margin-top:16px;">
+      <thead>
+        <tr><th>日期</th><th>金额</th><th>Token 数</th></tr>
+      </thead>
+      <tbody id="r-rows"></tbody>
+    </table>
+  </div>
+
+  <div id="result-rc" class="card hide">
+    <div class="card-title recharge">充值记录</div>
+    <p class="email-line" id="rc-email"></p>
+    <div class="summary">
+      <div class="stat">
+        <div class="lbl">当前余额</div>
+        <div class="val bal" id="rc-balance">-</div>
+      </div>
+      <div class="stat">
+        <div class="lbl">最近充值次数</div>
+        <div class="val" id="rc-count">-</div>
+      </div>
+    </div>
+
+    <table style="margin-top:16px;">
+      <thead>
+        <tr><th>时间</th><th>金额</th></tr>
+      </thead>
+      <tbody id="rc-rows"></tbody>
+    </table>
+    <div id="rc-empty" class="msg info hide" style="margin-top:12px;">该用户暂无充值记录</div>
+  </div>
+
+  <div class="foot">数据来源于实时账单，今日数据仍在累计中</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const btnUsage = $('btn-usage'), btnRecharge = $('btn-recharge');
+const emailEl = $('email'), msg = $('msg');
+const result = $('result'), resultRc = $('result-rc');
+
+// ---------------- 查询历史（cookie 保存） ----------------
+const HIST_COOKIE = 'usage_cn_hist';
+const HIST_MAX = 10;
+
+function setCookie(name, value, days){
+  const exp = new Date(Date.now() + days*864e5).toUTCString();
+  document.cookie = name + '=' + encodeURIComponent(value) + '; expires=' + exp + '; path=/; SameSite=Lax';
+}
+function getCookie(name){
+  const m = document.cookie.match('(?:^|; )' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[1]) : '';
+}
+function loadHistory(){
+  try{ const a = JSON.parse(getCookie(HIST_COOKIE) || '[]'); return Array.isArray(a) ? a : []; }
+  catch(e){ return []; }
+}
+function saveHistory(list){ setCookie(HIST_COOKIE, JSON.stringify(list), 365); }
+function addHistory(email){
+  email = (email || '').trim();
+  if(!email) return;
+  let list = loadHistory().filter(e => e.toLowerCase() !== email.toLowerCase());
+  list.unshift(email);
+  if(list.length > HIST_MAX) list = list.slice(0, HIST_MAX);
+  saveHistory(list);
+  renderHistory();
+}
+function removeHistory(email){
+  const list = loadHistory().filter(e => e.toLowerCase() !== email.toLowerCase());
+  saveHistory(list);
+  renderHistory();
+}
+function renderHistory(){
+  const list = loadHistory();
+  const box = $('hist'), chips = $('chips');
+  if(!list.length){ box.classList.add('hide'); return; }
+  box.classList.remove('hide');
+  chips.innerHTML = '';
+  list.forEach(email => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    const txt = document.createElement('span');
+    txt.className = 'txt'; txt.textContent = email; txt.title = email;
+    txt.addEventListener('click', () => { emailEl.value = email; doSearch('usage'); });
+    const x = document.createElement('span');
+    x.className = 'x'; x.textContent = '×'; x.title = '删除';
+    x.addEventListener('click', (e) => { e.stopPropagation(); removeHistory(email); });
+    chip.appendChild(txt); chip.appendChild(x);
+    chips.appendChild(chip);
+  });
+}
+
+// ---------------- 查询 ----------------
+function showMsg(text, kind){
+  msg.textContent = text;
+  msg.className = 'msg ' + (kind || 'info');
+}
+function hideMsg(){ msg.className = 'msg info hide'; }
+
+function fmtMoney(v){ return '$' + (Number(v)||0).toFixed(2); }
+function fmtMoneySigned(v){
+  const n = Number(v)||0;
+  const sign = n < 0 ? '-' : '+';
+  return sign + '$' + Math.abs(n).toFixed(2);
+}
+function fmtTokens(v){ return ((Number(v)||0)/1e6).toFixed(2) + 'M'; }
+function fmtDate(d){
+  try{
+    const dt = new Date(d + 'T00:00:00');
+    const w = ['日','一','二','三','四','五','六'][dt.getDay()];
+    return d.slice(5) + ' 周' + w;
+  }catch(e){ return d; }
+}
+function fmtTime(s){
+  if(!s) return '-';
+  try{
+    const dt = new Date(s);
+    if(isNaN(dt.getTime())) return String(s).slice(0,19).replace('T',' ');
+    const p = (n)=> String(n).padStart(2,'0');
+    return dt.getFullYear() + '-' + p(dt.getMonth()+1) + '-' + p(dt.getDate()) +
+           ' ' + p(dt.getHours()) + ':' + p(dt.getMinutes());
+  }catch(e){ return String(s); }
+}
+
+function setBusy(b){
+  btnUsage.disabled = b; btnRecharge.disabled = b;
+}
+
+async function doSearch(mode){
+  const email = emailEl.value.trim();
+  if(!email){ showMsg('请输入用户邮箱', 'err'); return; }
+  setBusy(true);
+  if(mode === 'recharge'){ btnRecharge.textContent = '查询中…'; }
+  else { btnUsage.textContent = '查询中…'; }
+  result.classList.add('hide');
+  resultRc.classList.add('hide');
+  showMsg('正在查询…', 'info');
+  const url = mode === 'recharge' ? '/api/usage-cn-recharge' : '/api/usage-cn-search';
+  try{
+    const resp = await fetch(url, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ email })
+    });
+    const data = await resp.json();
+    if(!data.ok){
+      showMsg(data.error || (data.found===false ? '未找到该用户' : '查询失败'), 'err');
+      return;
+    }
+    hideMsg();
+    addHistory(data.email || email);
+    if(mode === 'recharge') renderRecharge(data);
+    else renderResult(data);
+  }catch(e){
+    showMsg('网络错误，请稍后重试', 'err');
+  }finally{
+    setBusy(false);
+    btnUsage.textContent = '用量查询';
+    btnRecharge.textContent = '充值记录查询';
+  }
+}
+
+function renderResult(d){
+  $('r-email').textContent = '邮箱：' + d.email;
+  $('r-balance').textContent = fmtMoney(d.balance);
+  $('r-total-cost').textContent = fmtMoney(d.total_cost);
+  $('r-total-tokens').textContent = fmtTokens(d.total_tokens);
+  const tb = $('r-rows'); tb.innerHTML = '';
+  (d.days || []).slice().reverse().forEach(r => {
+    const tr = document.createElement('tr');
+    const isToday = r.date === d.today;
+    tr.innerHTML = '<td>' + fmtDate(r.date) +
+      (isToday ? '<span class="tag">今日累计</span>' : '') + '</td>' +
+      '<td>' + fmtMoney(r.cost) + '</td>' +
+      '<td>' + fmtTokens(r.tokens) + '</td>';
+    tb.appendChild(tr);
+  });
+  const tr = document.createElement('tr');
+  tr.className = 'total';
+  tr.innerHTML = '<td>合计</td><td>' + fmtMoney(d.total_cost) + '</td><td>' + fmtTokens(d.total_tokens) + '</td>';
+  tb.appendChild(tr);
+  result.classList.remove('hide');
+}
+
+function renderRecharge(d){
+  $('rc-email').textContent = '邮箱：' + d.email;
+  $('rc-balance').textContent = fmtMoney(d.balance);
+  $('rc-count').textContent = (d.count || 0) + ' 次';
+  const tb = $('rc-rows'); tb.innerHTML = '';
+  const recs = d.records || [];
+  if(!recs.length){
+    $('rc-empty').classList.remove('hide');
+  }else{
+    $('rc-empty').classList.add('hide');
+    recs.forEach(r => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + fmtTime(r.time) + '</td>' +
+        '<td>' + fmtMoneySigned(r.amount) + '</td>';
+      tb.appendChild(tr);
+    });
+  }
+  resultRc.classList.remove('hide');
+}
+
+btnUsage.addEventListener('click', ()=>doSearch('usage'));
+btnRecharge.addEventListener('click', ()=>doSearch('recharge'));
+emailEl.addEventListener('keydown', (e)=>{ if(e.key==='Enter') doSearch('usage'); });
+$('hist-clear').addEventListener('click', ()=>{ saveHistory([]); renderHistory(); });
+
+renderHistory();
+</script>
+</body>
+</html>
