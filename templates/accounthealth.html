@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>上游账号健康看板</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:#f5f7fa;color:#333;min-height:100vh}
+  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center}
+  .header h1{font-size:18px;font-weight:600}
+  .container{max-width:1600px;margin:0 auto;padding:20px}
+  .card{background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  .actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .btn{height:34px;padding:0 18px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#409eff;color:#fff}
+  .btn:disabled{background:#a0cfff}
+  .meta{color:#909399;font-size:12px}
+  .err{color:#f56c6c;font-size:13px;margin-top:8px;display:none}
+  .station-title{font-size:14px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .chip{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;background:#f0f2f5;color:#606266}
+  .chip.g{background:#e7f7ee;color:#1f9550}.chip.r{background:#fef0f0;color:#f56c6c}.chip.y{background:#fdf6ec;color:#e6a23c}
+  .result-wrap{overflow-x:auto}
+  table.t{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+  table.t th{background:#fafafa;color:#606266;font-weight:600;padding:8px 10px;text-align:left;border-bottom:2px solid #ebeef5}
+  table.t td{padding:7px 10px;text-align:left;border-bottom:1px solid #f0f2f5}
+  table.t tr.bad td{background:#fef6f6}
+  .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600}
+  .badge.ok{background:#e7f7ee;color:#1f9550}.badge.bad{background:#fef0f0;color:#f56c6c}.badge.warn{background:#fdf6ec;color:#e6a23c}
+  .muted{color:#c0c4cc}.wrap{white-space:normal;max-width:320px;color:#f56c6c}
+</style>
+</head>
+<body>
+  <div class="header"><h1>上游账号健康看板</h1></div>
+  <div class="container">
+    <div class="card">
+      <div class="actions">
+        <button class="btn" id="queryBtn">刷新</button>
+        <label class="meta"><input type="checkbox" id="onlyBad"> 只看异常账号</label>
+        <span class="meta" id="meta"></span>
+      </div>
+      <div class="err" id="err"></div>
+    </div>
+    <div id="stations"></div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ft=s=>{if(!s)return'<span class="muted">-</span>';try{return String(s).replace("T"," ").replace(/\..*$/,"").slice(0,19);}catch(e){return esc(s);}};
+let lastData=null,busy=false;
+
+function statusBadge(a){
+  if(a.problem){
+    let t=a.status||"异常";
+    if(a.schedulable===false)t="不可调度";
+    return '<span class="badge bad">'+esc(t)+'</span>';
+  }
+  return '<span class="badge ok">'+esc(a.status||"正常")+'</span>';
+}
+function render(){
+  if(!lastData)return;
+  const onlyBad=$("onlyBad").checked;
+  const wrap=$("stations");wrap.innerHTML="";
+  (lastData.stations||[]).forEach(s=>{
+    const card=document.createElement("div");card.className="card";
+    if(!s.ok){card.innerHTML='<div class="station-title">'+esc(s.name)+' <span class="chip r">查询失败: '+esc(s.error||"")+'</span></div>';wrap.appendChild(card);return;}
+    const sm=s.summary||{};
+    let rows=(s.accounts||[]);
+    if(onlyBad)rows=rows.filter(a=>a.problem);
+    let html='<div class="station-title">'+esc(s.name)+
+      ' <span class="chip">总 '+(s.count||0)+'</span>'+
+      ' <span class="chip g">正常 '+(sm.normal??"-")+'</span>'+
+      ' <span class="chip r">异常 '+(sm.error??"-")+'</span>'+
+      ' <span class="chip y">过载 '+(sm.overload??"-")+'</span>'+
+      ' <span class="chip y">限流 '+(sm.ratelimit??"-")+'</span></div>';
+    if(!rows.length){html+='<div class="muted">'+(onlyBad?"无异常账号 ✓":"无账号")+'</div>';card.innerHTML=html;wrap.appendChild(card);return;}
+    html+='<div class="result-wrap"><table class="t"><thead><tr>'+
+      '<th>账号</th><th>平台</th><th>状态</th><th>可调度</th><th>并发</th><th>分组</th><th>临时下线至/原因</th><th>限流恢复</th><th>错误</th><th>最近使用</th>'+
+      '</tr></thead><tbody>';
+    rows.forEach(a=>{
+      html+='<tr'+(a.problem?' class="bad"':'')+'>'+
+        '<td><b>'+esc(a.name)+'</b></td>'+
+        '<td>'+esc(a.platform)+'</td>'+
+        '<td>'+statusBadge(a)+'</td>'+
+        '<td>'+(a.schedulable===false?'<span class="badge bad">否</span>':'<span class="badge ok">是</span>')+'</td>'+
+        '<td>'+(a.concurrency??"-")+'</td>'+
+        '<td>'+esc((a.groups||[]).join(", ")||"-")+'</td>'+
+        '<td>'+(a.temp_unschedulable_until?ft(a.temp_unschedulable_until)+(a.temp_unschedulable_reason?' ('+esc(a.temp_unschedulable_reason)+')':''):'<span class="muted">-</span>')+'</td>'+
+        '<td>'+(a.rate_limit_reset_at?ft(a.rate_limit_reset_at):'<span class="muted">-</span>')+'</td>'+
+        '<td class="wrap">'+(a.error_message?esc(a.error_message):'<span class="muted">-</span>')+'</td>'+
+        '<td>'+ft(a.last_used_at)+'</td></tr>';
+    });
+    html+='</tbody></table></div>';
+    card.innerHTML=html;wrap.appendChild(card);
+  });
+}
+async function load(){
+  if(busy)return;busy=true;
+  const err=$("err");err.style.display="none";
+  const btn=$("queryBtn");btn.disabled=true;btn.textContent="刷新中…";
+  try{
+    const resp=await fetch("/api/account-health",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    lastData=await resp.json();
+    if(!(lastData.stations||[]).length){$("stations").innerHTML='<div class="card muted">未配置任何站点，请到 /settingsites 添加</div>';}
+    else render();
+    $("meta").textContent="更新于 "+(lastData.server_time||"").replace("T"," ");
+  }catch(e){err.textContent="请求失败: "+e;err.style.display="block";}
+  finally{busy=false;btn.disabled=false;btn.textContent="刷新";}
+}
+$("queryBtn").onclick=load;
+$("onlyBad").onchange=render;
+load();
+</script>
+</body>
+</html>

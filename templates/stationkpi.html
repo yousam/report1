@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>跨站每日 KPI 对比</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:#f5f7fa;color:#333;min-height:100vh}
+  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center}
+  .header h1{font-size:18px;font-weight:600}
+  .container{max-width:1600px;margin:0 auto;padding:20px}
+  .card{background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  .actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .btn{height:34px;padding:0 18px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#409eff;color:#fff}
+  .btn:disabled{background:#a0cfff}
+  .meta{color:#909399;font-size:12px}
+  .err{color:#f56c6c;font-size:13px;margin-top:8px;display:none}
+  .result-wrap{overflow-x:auto}
+  table.t{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  table.t th{background:#fafafa;color:#606266;font-weight:600;padding:9px 10px;text-align:right;border-bottom:2px solid #ebeef5}
+  table.t th.l,table.t td.l{text-align:left}
+  table.t td{padding:8px 10px;text-align:right;border-bottom:1px solid #f0f2f5}
+  table.t tr:hover td{background:#f8fbff}
+  table.t td.name{font-weight:600;color:#1a1a1a}
+  table.t tr.total td{border-top:2px solid #ebeef5;background:#fafcff;font-weight:700}
+  .row-error td{background:#fef0f0}
+  .err-text{color:#f56c6c;text-align:left}
+  .g{color:#67c23a}.r{color:#f56c6c;font-weight:600}.y{color:#e6a23c;font-weight:600}.muted{color:#c0c4cc}
+  .auto-refresh{display:flex;align-items:center;gap:6px;font-size:13px;color:#606266}
+</style>
+</head>
+<body>
+  <div class="header"><h1>跨站每日 KPI 对比</h1></div>
+  <div class="container">
+    <div class="card">
+      <div class="actions">
+        <button class="btn" id="queryBtn">刷新</button>
+        <label class="auto-refresh"><input type="checkbox" id="autoRefresh"> 每60秒自动刷新</label>
+        <span class="meta" id="meta"></span>
+      </div>
+      <div class="err" id="err"></div>
+    </div>
+    <div class="card">
+      <div class="result-wrap">
+        <table class="t">
+          <thead><tr>
+            <th class="l">站点</th>
+            <th>今日请求</th><th>今日Token</th><th>今日实收$</th>
+            <th>新增用户</th><th>活跃用户</th><th>总用户</th>
+            <th>账号正常</th><th>异常</th><th>过载</th><th>限流</th><th>账号总数</th>
+            <th>RPM</th><th>TPM</th><th>平均时长ms</th>
+          </tr></thead>
+          <tbody id="body"><tr><td class="l muted" colspan="15">加载中…</td></tr></tbody>
+          <tfoot id="foot"></tfoot>
+        </table>
+      </div>
+    </div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ni=v=>v==null?'<span class="muted">-</span>':Number(v).toLocaleString();
+const nf=(v,d)=>v==null?'<span class="muted">-</span>':Number(v).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
+let timer=null,busy=false;
+
+async function load(){
+  if(busy)return; busy=true;
+  const err=$("err");err.style.display="none";
+  const btn=$("queryBtn");btn.disabled=true;btn.textContent="刷新中…";
+  try{
+    const resp=await fetch("/api/station-kpi",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    const data=await resp.json();
+    const sts=data.stations||[];
+    const body=$("body");body.innerHTML="";
+    if(!sts.length){body.innerHTML='<tr><td class="l muted" colspan="15">未配置任何站点，请到 /settingsites 添加</td></tr>';$("foot").innerHTML="";return;}
+    const tot={today_requests:0,today_tokens:0,today_actual_cost:0,today_new_users:0,active_users:0,total_users:0,normal_accounts:0,error_accounts:0,overload_accounts:0,ratelimit_accounts:0,total_accounts:0};
+    sts.forEach(s=>{
+      const tr=document.createElement("tr");
+      if(!s.ok){tr.className="row-error";tr.innerHTML='<td class="l name">'+esc(s.name)+'</td><td class="err-text" colspan="14">⚠ '+esc(s.error||"失败")+'</td>';body.appendChild(tr);return;}
+      for(const k in tot)tot[k]+=Number(s[k]||0);
+      tr.innerHTML='<td class="l name">'+esc(s.name)+'</td>'+
+        '<td>'+ni(s.today_requests)+'</td><td>'+ni(s.today_tokens)+'</td><td>'+nf(s.today_actual_cost,2)+'</td>'+
+        '<td>'+ni(s.today_new_users)+'</td><td>'+ni(s.active_users)+'</td><td>'+ni(s.total_users)+'</td>'+
+        '<td class="g">'+ni(s.normal_accounts)+'</td>'+
+        '<td class="'+(s.error_accounts>0?'r':'')+'">'+ni(s.error_accounts)+'</td>'+
+        '<td class="'+(s.overload_accounts>0?'y':'')+'">'+ni(s.overload_accounts)+'</td>'+
+        '<td class="'+(s.ratelimit_accounts>0?'y':'')+'">'+ni(s.ratelimit_accounts)+'</td>'+
+        '<td>'+ni(s.total_accounts)+'</td>'+
+        '<td>'+ni(s.rpm)+'</td><td>'+ni(s.tpm)+'</td><td>'+nf(s.avg_duration_ms,0)+'</td>';
+      body.appendChild(tr);
+    });
+    $("foot").innerHTML='<tr class="total"><td class="l">合计</td>'+
+      '<td>'+ni(tot.today_requests)+'</td><td>'+ni(tot.today_tokens)+'</td><td>'+nf(tot.today_actual_cost,2)+'</td>'+
+      '<td>'+ni(tot.today_new_users)+'</td><td>'+ni(tot.active_users)+'</td><td>'+ni(tot.total_users)+'</td>'+
+      '<td>'+ni(tot.normal_accounts)+'</td><td>'+ni(tot.error_accounts)+'</td><td>'+ni(tot.overload_accounts)+'</td><td>'+ni(tot.ratelimit_accounts)+'</td><td>'+ni(tot.total_accounts)+'</td>'+
+      '<td></td><td></td><td></td></tr>';
+    $("meta").textContent="更新于 "+(data.server_time||"").replace("T"," ");
+  }catch(e){err.textContent="请求失败: "+e;err.style.display="block";}
+  finally{busy=false;btn.disabled=false;btn.textContent="刷新";}
+}
+function setupAuto(){if(timer){clearInterval(timer);timer=null;}if($("autoRefresh").checked)timer=setInterval(load,60000);}
+$("queryBtn").onclick=load;
+$("autoRefresh").onchange=setupAuto;
+load();
+</script>
+</body>
+</html>

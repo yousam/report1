@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>充值/收入报表</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:#f5f7fa;color:#333;min-height:100vh}
+  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center}
+  .header h1{font-size:18px;font-weight:600}
+  .container{max-width:1500px;margin:0 auto;padding:20px}
+  .card{background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  .card h2{font-size:14px;font-weight:600;margin-bottom:12px}
+  .actions{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+  .fi{display:flex;flex-direction:column;gap:5px}
+  .fi label{font-size:12px;color:#606266}
+  .fi input{height:34px;padding:0 10px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;outline:none}
+  .btn{height:34px;padding:0 18px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#409eff;color:#fff}
+  .btn:disabled{background:#a0cfff}
+  .meta{color:#909399;font-size:12px}
+  .err{color:#f56c6c;font-size:13px;margin-top:8px;display:none}
+  .cards{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:4px}
+  .stat{flex:1;min-width:150px;background:#fafbfc;border:1px solid #ebeef5;border-radius:8px;padding:12px 14px}
+  .stat .v{font-size:24px;font-weight:700;color:#1a1a1a}
+  .stat .l{font-size:12px;color:#909399;margin-top:2px}
+  .result-wrap{overflow-x:auto}
+  table.t{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  table.t th{background:#fafafa;color:#606266;font-weight:600;padding:8px 10px;text-align:right;border-bottom:2px solid #ebeef5}
+  table.t th.l,table.t td.l{text-align:left}
+  table.t td{padding:7px 10px;text-align:right;border-bottom:1px solid #f0f2f5}
+  table.t tr.total td{border-top:2px solid #ebeef5;background:#fafcff;font-weight:700}
+  .muted{color:#c0c4cc}
+</style>
+</head>
+<body>
+  <div class="header"><h1>充值/收入报表</h1></div>
+  <div class="container">
+    <div class="card">
+      <div class="actions">
+        <div class="fi"><label>开始日期</label><input type="date" id="start" value="{{ week_ago }}"></div>
+        <div class="fi"><label>结束日期</label><input type="date" id="end" value="{{ today }}"></div>
+        <button class="btn" id="queryBtn">查询</button>
+        <span class="meta" id="meta"></span>
+      </div>
+      <div class="err" id="err"></div>
+    </div>
+
+    <div class="card" id="sumCard" style="display:none"><div class="cards" id="sum"></div></div>
+
+    <div class="card">
+      <h2>按天收入（各站点 + 合计）</h2>
+      <div class="result-wrap"><table class="t" id="dayTable"><thead id="dayHead"></thead><tbody id="dayBody"><tr><td class="l muted">填时间段后点查询</td></tr></tbody><tfoot id="dayFoot"></tfoot></table></div>
+    </div>
+
+    <div class="card">
+      <h2>按类型</h2>
+      <div class="result-wrap"><table class="t"><thead><tr><th class="l">类型</th><th>金额$</th></tr></thead><tbody id="typeBody"></tbody></table></div>
+    </div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const nf=(v,d)=>v==null?'-':Number(v).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
+const ni=v=>v==null?'-':Number(v).toLocaleString();
+
+async function query(){
+  const start=$("start").value,end=$("end").value,err=$("err");err.style.display="none";
+  if(!start||!end){err.textContent="请选择时间段";err.style.display="block";return;}
+  const btn=$("queryBtn");btn.disabled=true;btn.textContent="查询中…";
+  try{
+    const resp=await fetch("/api/revenue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({start,end})});
+    const d=await resp.json();
+    if(!d.ok){err.textContent=d.error||"查询失败";err.style.display="block";return;}
+    const sts=(d.stations||[]).filter(s=>s.ok);
+    const days=d.days||[];
+    // 汇总
+    let amount=0,usedRange=0,usedTotal=0,codesTotal=0;
+    const typeAgg={};
+    sts.forEach(s=>{amount+=s.amount_total||0;usedRange+=s.used_in_range||0;usedTotal+=s.used_total||0;codesTotal+=s.total_codes||0;
+      for(const t in (s.by_type||{}))typeAgg[t]=(typeAgg[t]||0)+s.by_type[t];});
+    const rate=codesTotal>0?(usedTotal/codesTotal*100):0;
+    $("sumCard").style.display="";
+    $("sum").innerHTML=
+      '<div class="stat"><div class="v">'+nf(amount,2)+'</div><div class="l">区间收入$</div></div>'+
+      '<div class="stat"><div class="v">'+ni(usedRange)+'</div><div class="l">区间核销数</div></div>'+
+      '<div class="stat"><div class="v">'+ni(usedTotal)+' / '+ni(codesTotal)+'</div><div class="l">累计核销/发放</div></div>'+
+      '<div class="stat"><div class="v">'+nf(rate,1)+'%</div><div class="l">核销率</div></div>';
+    // 按天表：列= 日期 + 各站点 + 合计
+    let head='<tr><th class="l">日期</th>';sts.forEach(s=>head+='<th>'+esc(s.name)+'$</th>');head+='<th>合计$</th></tr>';
+    $("dayHead").innerHTML=head;
+    const body=$("dayBody");body.innerHTML="";
+    const colTot=sts.map(()=>0);let grand=0;
+    days.forEach(day=>{
+      let row='<td class="l">'+day+'</td>';let rt=0;
+      sts.forEach((s,i)=>{const v=(s.by_day||{})[day]||0;rt+=v;colTot[i]+=v;row+='<td>'+(v?nf(v,2):'<span class="muted">·</span>')+'</td>';});
+      grand+=rt;row+='<td>'+(rt?nf(rt,2):'<span class="muted">·</span>')+'</td>';
+      const tr=document.createElement("tr");tr.innerHTML=row;body.appendChild(tr);
+    });
+    let foot='<tr class="total"><td class="l">合计</td>';colTot.forEach(v=>foot+='<td>'+nf(v,2)+'</td>');foot+='<td>'+nf(grand,2)+'</td></tr>';
+    $("dayFoot").innerHTML=foot;
+    // 类型
+    const tb=$("typeBody");tb.innerHTML="";
+    const types=Object.keys(typeAgg).sort((a,b)=>typeAgg[b]-typeAgg[a]);
+    if(!types.length)tb.innerHTML='<tr><td class="l muted" colspan="2">无</td></tr>';
+    else types.forEach(t=>{const tr=document.createElement("tr");tr.innerHTML='<td class="l">'+esc(t)+'</td><td>'+nf(typeAgg[t],2)+'</td>';tb.appendChild(tr);});
+    // 站点失败提示
+    const failed=(d.stations||[]).filter(s=>!s.ok);
+    $("meta").textContent="更新于 "+(d.server_time||"").replace("T"," ")+(failed.length?(" · "+failed.length+" 站失败"):"");
+  }catch(e){err.textContent="请求失败: "+e;err.style.display="block";}
+  finally{btn.disabled=false;btn.textContent="查询";}
+}
+$("queryBtn").onclick=query;
+</script>
+</body>
+</html>

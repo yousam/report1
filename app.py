@@ -1,8 +1,12 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import threading
 import time
+import urllib.parse
 from datetime import date, datetime, timedelta
 
 import httpx
@@ -1376,3 +1380,657 @@ async def post_usage_cn_recharge(request: Request):
         "count": len(records),
         "server_time": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+# ============================================================================
+# 新增报表（站点凭证统一取自 sites.json；浏览器不传密码）
+#   /stationkpi     跨站每日 KPI 对比     -> /api/station-kpi
+#   /accounthealth  上游账号健康看板       -> /api/account-health
+#   /usereconomy    用户经济看板          -> /api/user-economy
+#   /revenuereport  充值/收入报表         -> /api/revenue
+#   /modelprofit    模型利润分解          -> /api/model-profit
+#   /alertpush      推送告警(钉钉)        -> /api/alert-config /alert-test /alert-check
+# ============================================================================
+
+def _gnum(v):
+    """尽量转成数字，失败返回 0。"""
+    try:
+        if v is None:
+            return 0
+        return float(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _fanout_sites(fn, names=None):
+    """对所有(或指定)已配置站点并发执行 fn(client, site)，每站返回一个 dict。
+    单站异常不影响整体。"""
+    sites = _load_sites()
+    if names:
+        wanted = {str(n).strip().lower() for n in names if str(n).strip()}
+        sites = [s for s in sites if s["name"].lower() in wanted]
+    if not sites:
+        return []
+    async with httpx.AsyncClient(timeout=30) as client:
+        results = await asyncio.gather(
+            *[fn(client, s) for s in sites], return_exceptions=True
+        )
+    out = []
+    for s, r in zip(sites, results):
+        if isinstance(r, dict):
+            out.append(r)
+        else:
+            out.append({"name": s["name"], "base_url": s["base_url"], "ok": False, "error": f"内部错误: {r}"})
+    return out
+
+
+async def _get_all_pages(client, base_url, jwt, path, params, max_pages=80, page_size=100):
+    """翻页拉全量列表（分页响应 {items,total,pages}）。"""
+    items = []
+    page = 1
+    while page <= max_pages:
+        ok, data = await _get_json(client, base_url, jwt, path, {**params, "page": page, "page_size": page_size})
+        if not ok:
+            break
+        batch = _items_of(data)
+        items.extend(batch)
+        pages = data.get("pages") if isinstance(data, dict) else None
+        if not batch or (pages and page >= pages):
+            break
+        page += 1
+    return items
+
+
+# ---------------- 跨站每日 KPI 对比 ----------------
+@app.get("/stationkpi")
+async def stationkpi_page(request: Request):
+    return templates.TemplateResponse("stationkpi.html", {"request": request})
+
+
+@app.post("/api/station-kpi")
+async def post_station_kpi(request: Request):
+    async def one(client, s):
+        res = {"name": s["name"], "base_url": s["base_url"], "ok": False}
+        if not s["base_url"]:
+            res["error"] = "缺少站点地址"
+            return res
+        try:
+            jwt = await _login(client, s["base_url"], s["email"], s["password"])
+        except Exception as e:
+            res["error"] = str(e)
+            return res
+        ok, data = await _get_json(client, s["base_url"], jwt, "/api/v1/admin/dashboard/stats")
+        if not ok or not isinstance(data, dict):
+            res["error"] = "获取 stats 失败"
+            return res
+        g = _gnum
+        res.update({
+            "ok": True,
+            "today_requests": g(data.get("today_requests")),
+            "today_tokens": g(data.get("today_tokens")),
+            "today_actual_cost": g(data.get("today_actual_cost")),
+            "today_cost": g(data.get("today_cost")),
+            "today_new_users": g(data.get("today_new_users")),
+            "active_users": g(data.get("active_users")),
+            "total_users": g(data.get("total_users")),
+            "total_accounts": g(data.get("total_accounts")),
+            "normal_accounts": g(data.get("normal_accounts")),
+            "error_accounts": g(data.get("error_accounts")),
+            "overload_accounts": g(data.get("overload_accounts")),
+            "ratelimit_accounts": g(data.get("ratelimit_accounts")),
+            "rpm": g(data.get("rpm")),
+            "tpm": g(data.get("tpm")),
+            "avg_duration_ms": g(data.get("average_duration_ms")),
+        })
+        return res
+
+    stations = await _fanout_sites(one)
+    return {"ok": True, "stations": stations, "server_time": datetime.now().isoformat(timespec="seconds")}
+
+
+# ---------------- 上游账号健康看板 ----------------
+@app.get("/accounthealth")
+async def accounthealth_page(request: Request):
+    return templates.TemplateResponse("accounthealth.html", {"request": request})
+
+
+def _account_problem(a: dict) -> bool:
+    if a.get("schedulable") is False:
+        return True
+    if a.get("temp_unschedulable_until") or a.get("overload_until") or a.get("rate_limit_reset_at"):
+        return True
+    st = (a.get("status") or "").lower()
+    if st and st not in ("active", "normal", "ok", "enabled", "schedulable"):
+        return True
+    if a.get("error_message"):
+        return True
+    return False
+
+
+@app.post("/api/account-health")
+async def post_account_health(request: Request):
+    async def one(client, s):
+        res = {"name": s["name"], "base_url": s["base_url"], "ok": False}
+        if not s["base_url"]:
+            res["error"] = "缺少站点地址"
+            return res
+        try:
+            jwt = await _login(client, s["base_url"], s["email"], s["password"])
+        except Exception as e:
+            res["error"] = str(e)
+            return res
+        ok, stats = await _get_json(client, s["base_url"], jwt, "/api/v1/admin/dashboard/stats")
+        summary = {}
+        if ok and isinstance(stats, dict):
+            summary = {
+                "total": _gnum(stats.get("total_accounts")),
+                "normal": _gnum(stats.get("normal_accounts")),
+                "error": _gnum(stats.get("error_accounts")),
+                "overload": _gnum(stats.get("overload_accounts")),
+                "ratelimit": _gnum(stats.get("ratelimit_accounts")),
+            }
+        accounts = await _get_all_pages(client, s["base_url"], jwt, "/api/v1/admin/accounts", {})
+        rows = []
+        for a in accounts:
+            if not isinstance(a, dict):
+                continue
+            groups = a.get("account_groups") or []
+            gnames = []
+            for ag in groups:
+                if isinstance(ag, dict) and isinstance(ag.get("group"), dict):
+                    n = ag["group"].get("name")
+                    if n:
+                        gnames.append(n)
+            rows.append({
+                "id": a.get("id"),
+                "name": a.get("name"),
+                "platform": a.get("platform"),
+                "status": a.get("status"),
+                "schedulable": a.get("schedulable"),
+                "concurrency": a.get("concurrency"),
+                "error_message": a.get("error_message") or "",
+                "temp_unschedulable_until": a.get("temp_unschedulable_until"),
+                "temp_unschedulable_reason": a.get("temp_unschedulable_reason") or "",
+                "rate_limited_at": a.get("rate_limited_at"),
+                "rate_limit_reset_at": a.get("rate_limit_reset_at"),
+                "overload_until": a.get("overload_until"),
+                "last_used_at": a.get("last_used_at"),
+                "groups": gnames,
+                "problem": _account_problem(a),
+            })
+        # 有问题的排前面
+        rows.sort(key=lambda r: (not r["problem"], str(r.get("platform") or ""), str(r.get("name") or "")))
+        res.update({"ok": True, "summary": summary, "accounts": rows, "count": len(rows)})
+        return res
+
+    stations = await _fanout_sites(one)
+    return {"ok": True, "stations": stations, "server_time": datetime.now().isoformat(timespec="seconds")}
+
+
+# ---------------- 用户经济看板 ----------------
+@app.get("/usereconomy")
+async def usereconomy_page(request: Request):
+    return templates.TemplateResponse("usereconomy.html", {"request": request})
+
+
+@app.post("/api/user-economy")
+async def post_user_economy(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    name = str((payload or {}).get("site", "")).strip()
+    site = _find_site(name)
+    if not site or not site["base_url"]:
+        return {"ok": False, "error": f"未找到站点: {name}"}
+    low_thr = _gnum((payload or {}).get("low_balance", 5))
+    churn_days = int(_gnum((payload or {}).get("churn_days", 14)) or 14)
+    new_days = int(_gnum((payload or {}).get("new_days", 7)) or 7)
+
+    async with httpx.AsyncClient(timeout=40) as client:
+        try:
+            jwt = await _login(client, site["base_url"], site["email"], site["password"])
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        users = await _get_all_pages(client, site["base_url"], jwt, "/api/v1/admin/users", {})
+        # 消费排行（近30天）
+        today = date.today()
+        ok, rank = await _get_json(
+            client, site["base_url"], jwt, "/api/v1/admin/dashboard/users-ranking",
+            {"start_date": (today - timedelta(days=29)).isoformat(), "end_date": today.isoformat(), "timezone": "Asia/Shanghai"},
+        )
+        ranking = (rank.get("ranking") if ok and isinstance(rank, dict) else []) or []
+
+    now = datetime.now()
+    def _parse(ts):
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(str(ts).replace("Z", "").split(".")[0].replace("T", " "))
+        except ValueError:
+            return None
+
+    total_balance = 0.0
+    total_recharged = 0.0
+    low_list, churn_list, new_list = [], [], []
+    for u in users:
+        if not isinstance(u, dict):
+            continue
+        bal = _gnum(u.get("balance"))
+        total_balance += bal
+        total_recharged += _gnum(u.get("total_recharged"))
+        email = u.get("email") or u.get("username") or str(u.get("id"))
+        la = _parse(u.get("last_active_at") or u.get("last_used_at"))
+        ca = _parse(u.get("created_at"))
+        if bal <= low_thr:
+            low_list.append({"email": email, "balance": round(bal, 4)})
+        if bal > 0 and la is not None and (now - la).days >= churn_days:
+            churn_list.append({"email": email, "balance": round(bal, 4), "last_active": u.get("last_active_at") or u.get("last_used_at")})
+        if ca is not None and (now - ca).days <= new_days:
+            new_list.append({"email": email, "created_at": u.get("created_at"), "total_recharged": round(_gnum(u.get("total_recharged")), 4)})
+    low_list.sort(key=lambda x: x["balance"])
+    churn_list.sort(key=lambda x: -x["balance"])
+    new_list.sort(key=lambda x: str(x["created_at"]), reverse=True)
+    top_spend = [{"email": r.get("email"), "actual_cost": round(_gnum(r.get("actual_cost")), 4),
+                  "requests": _gnum(r.get("requests")), "tokens": _gnum(r.get("tokens"))} for r in ranking[:20]]
+
+    return {
+        "ok": True,
+        "site": site["name"],
+        "summary": {
+            "total_users": len(users),
+            "total_balance": round(total_balance, 2),
+            "total_recharged": round(total_recharged, 2),
+            "low_count": len(low_list),
+            "churn_count": len(churn_list),
+            "new_count": len(new_list),
+        },
+        "low_balance": low_list[:50],
+        "churn": churn_list[:50],
+        "new_users": new_list[:50],
+        "top_spend": top_spend,
+        "params": {"low_balance": low_thr, "churn_days": churn_days, "new_days": new_days},
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+# ---------------- 充值/收入报表 ----------------
+@app.get("/revenuereport")
+async def revenuereport_page(request: Request):
+    return templates.TemplateResponse(
+        "revenuereport.html",
+        {"request": request, "today": date.today().isoformat(),
+         "week_ago": (date.today() - timedelta(days=6)).isoformat()},
+    )
+
+
+@app.post("/api/revenue")
+async def post_revenue(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    start = str((payload or {}).get("start", "")).strip()
+    end = str((payload or {}).get("end", "")).strip()
+    if not start or not end:
+        return {"ok": False, "error": "缺少时间段"}
+    try:
+        d0 = date.fromisoformat(start)
+        d1 = date.fromisoformat(end)
+    except ValueError:
+        return {"ok": False, "error": "日期格式应为 YYYY-MM-DD"}
+    if d1 < d0:
+        d0, d1 = d1, d0
+
+    def _used_day(ts):
+        if not ts:
+            return None
+        s = str(ts).replace("T", " ")
+        return s[:10] if len(s) >= 10 else None
+
+    async def one(client, s):
+        res = {"name": s["name"], "base_url": s["base_url"], "ok": False}
+        if not s["base_url"]:
+            res["error"] = "缺少站点地址"
+            return res
+        try:
+            jwt = await _login(client, s["base_url"], s["email"], s["password"])
+        except Exception as e:
+            res["error"] = str(e)
+            return res
+        used = await _get_all_pages(client, s["base_url"], jwt, "/api/v1/admin/redeem-codes", {"status": "used"})
+        ok_all, all_data = await _get_json(client, s["base_url"], jwt, "/api/v1/admin/redeem-codes", {"page": 1, "page_size": 1})
+        total_codes = _gnum(all_data.get("total")) if ok_all and isinstance(all_data, dict) else 0
+        by_day, by_type = {}, {}
+        used_in_range = 0
+        amount_total = 0.0
+        for it in used:
+            if not isinstance(it, dict):
+                continue
+            day = _used_day(it.get("used_at"))
+            if not day or day < start or day > end:
+                continue
+            val = _gnum(it.get("value"))
+            used_in_range += 1
+            amount_total += val
+            by_day[day] = by_day.get(day, 0.0) + val
+            t = it.get("type") or "-"
+            by_type[t] = by_type.get(t, 0.0) + val
+        res.update({
+            "ok": True,
+            "amount_total": round(amount_total, 4),
+            "used_in_range": used_in_range,
+            "used_total": len(used),
+            "total_codes": total_codes,
+            "by_day": {k: round(v, 4) for k, v in by_day.items()},
+            "by_type": {k: round(v, 4) for k, v in by_type.items()},
+        })
+        return res
+
+    stations = await _fanout_sites(one, (payload or {}).get("names"))
+    # 汇总按天
+    all_days = [(d0 + timedelta(days=i)).isoformat() for i in range((d1 - d0).days + 1)]
+    return {
+        "ok": True,
+        "start": start, "end": end, "days": all_days,
+        "stations": stations,
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+# ---------------- 模型利润分解 ----------------
+@app.get("/modelprofit")
+async def modelprofit_page(request: Request):
+    return templates.TemplateResponse(
+        "modelprofit.html",
+        {"request": request, "today": date.today().isoformat(),
+         "week_ago": (date.today() - timedelta(days=6)).isoformat()},
+    )
+
+
+@app.post("/api/model-profit")
+async def post_model_profit(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    start = str((payload or {}).get("start", "")).strip()
+    end = str((payload or {}).get("end", "")).strip()
+    if not start or not end:
+        return {"ok": False, "error": "缺少时间段"}
+    try:
+        date.fromisoformat(start)
+        date.fromisoformat(end)
+    except ValueError:
+        return {"ok": False, "error": "日期格式应为 YYYY-MM-DD"}
+
+    async def one(client, s):
+        res = {"name": s["name"], "base_url": s["base_url"], "ok": False}
+        if not s["base_url"]:
+            res["error"] = "缺少站点地址"
+            return res
+        try:
+            jwt = await _login(client, s["base_url"], s["email"], s["password"])
+        except Exception as e:
+            res["error"] = str(e)
+            return res
+        ok, data = await _get_json(
+            client, s["base_url"], jwt, "/api/v1/admin/dashboard/models",
+            {"start_date": start, "end_date": end, "timezone": "Asia/Shanghai"},
+        )
+        models = (data.get("models") if ok and isinstance(data, dict) else []) or []
+        res.update({"ok": True, "models": [
+            {
+                "model": m.get("model"),
+                "requests": _gnum(m.get("requests")),
+                "tokens": _gnum(m.get("total_tokens")),
+                "actual_cost": _gnum(m.get("actual_cost")),
+                "account_cost": _gnum(m.get("account_cost")),
+                "cost": _gnum(m.get("cost")),
+            } for m in models if isinstance(m, dict)
+        ]})
+        return res
+
+    stations = await _fanout_sites(one, (payload or {}).get("names"))
+    # 跨站按模型汇总
+    agg = {}
+    for st in stations:
+        if not st.get("ok"):
+            continue
+        for m in st.get("models", []):
+            k = m["model"] or "-"
+            a = agg.setdefault(k, {"model": k, "requests": 0.0, "tokens": 0.0, "actual_cost": 0.0, "account_cost": 0.0, "cost": 0.0})
+            for f in ("requests", "tokens", "actual_cost", "account_cost", "cost"):
+                a[f] += _gnum(m.get(f))
+    models_agg = []
+    for m in agg.values():
+        margin = m["actual_cost"] - m["account_cost"]
+        m["margin"] = round(margin, 4)
+        m["margin_pct"] = round((margin / m["actual_cost"] * 100), 2) if m["actual_cost"] else 0
+        for f in ("actual_cost", "account_cost", "cost"):
+            m[f] = round(m[f], 4)
+        models_agg.append(m)
+    models_agg.sort(key=lambda x: -x["actual_cost"])
+    return {"ok": True, "start": start, "end": end, "stations": stations, "models": models_agg,
+            "server_time": datetime.now().isoformat(timespec="seconds")}
+
+
+# ============================================================================
+# 推送告警 + 钉钉 (DingTalk)
+#   告警配置存 ALERTS_FILE(默认 /data/alerts.json，已 gitignore，不入库)。
+#   含钉钉机器人 webhook + 加签 secret(可选) + 阈值规则 + 开关。
+#   webhook/secret 不回显(只标 has_*)；保存时留空=不修改。
+# ============================================================================
+ALERTS_FILE = os.getenv("ALERTS_FILE", "/data/alerts.json")
+_alerts_lock = threading.Lock()
+_alert_last_sent: dict[str, float] = {}
+ALERT_COOLDOWN_S = 600  # 同一条告警 10 分钟内不重复推送
+
+_DEFAULT_ALERT_RULES = {
+    "sla_min": 98.0,            # SLA 低于此值(%)告警
+    "error_rate_max": 3.0,      # 请求错误率高于此值(%)告警
+    "upstream_rate_max": 5.0,   # 上游错误率高于此值(%)告警
+    "normal_accounts_min": 1,   # 正常可用账号数低于此值告警
+}
+
+
+def _load_alerts() -> dict:
+    try:
+        with open(ALERTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError, OSError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    dt = data.get("dingtalk") or {}
+    rules = {**_DEFAULT_ALERT_RULES, **(data.get("rules") or {})}
+    return {
+        "enabled": bool(data.get("enabled", False)),
+        "dingtalk": {"webhook": str(dt.get("webhook", "")), "secret": str(dt.get("secret", ""))},
+        "rules": rules,
+    }
+
+
+def _save_alerts(cfg: dict) -> None:
+    os.makedirs(os.path.dirname(ALERTS_FILE) or ".", exist_ok=True)
+    tmp = ALERTS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, ALERTS_FILE)
+
+
+def _dingtalk_sign(secret: str, ts: str) -> str:
+    string_to_sign = f"{ts}\n{secret}"
+    digest = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).digest()
+    return urllib.parse.quote_plus(base64.b64encode(digest))
+
+
+async def _dingtalk_send(client: httpx.AsyncClient, webhook: str, secret: str, text: str) -> tuple[bool, str]:
+    if not webhook:
+        return False, "未配置钉钉 webhook"
+    url = webhook
+    if secret:
+        ts = str(round(time.time() * 1000))
+        sign = _dingtalk_sign(secret, ts)
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}timestamp={ts}&sign={sign}"
+    try:
+        r = await client.post(url, json={"msgtype": "text", "text": {"content": text}}, timeout=15)
+        j = r.json()
+    except Exception as e:
+        return False, f"请求钉钉失败: {e}"
+    if j.get("errcode") == 0:
+        return True, ""
+    return False, j.get("errmsg") or str(j)
+
+
+@app.get("/alertpush")
+async def alertpush_page(request: Request):
+    return templates.TemplateResponse("alertpush.html", {"request": request})
+
+
+@app.get("/api/alert-config")
+async def get_alert_config():
+    cfg = _load_alerts()
+    dt = cfg["dingtalk"]
+    return {
+        "ok": True,
+        "enabled": cfg["enabled"],
+        "rules": cfg["rules"],
+        "dingtalk": {"has_webhook": bool(dt["webhook"]), "has_secret": bool(dt["secret"])},
+    }
+
+
+@app.post("/api/alert-config")
+async def post_alert_config(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "请求体格式错误"}
+    with _alerts_lock:
+        cur = _load_alerts()
+        cur["enabled"] = bool(payload.get("enabled", cur["enabled"]))
+        rules_in = payload.get("rules") or {}
+        for k in _DEFAULT_ALERT_RULES:
+            if k in rules_in:
+                cur["rules"][k] = _gnum(rules_in[k])
+        dt_in = payload.get("dingtalk") or {}
+        # 留空=不改
+        if str(dt_in.get("webhook", "")).strip():
+            cur["dingtalk"]["webhook"] = str(dt_in["webhook"]).strip()
+        if str(dt_in.get("secret", "")).strip():
+            cur["dingtalk"]["secret"] = str(dt_in["secret"]).strip()
+        try:
+            _save_alerts(cur)
+        except OSError as e:
+            return {"ok": False, "error": f"写入失败: {e}"}
+    return {"ok": True}
+
+
+@app.post("/api/alert-test")
+async def post_alert_test(request: Request):
+    cfg = _load_alerts()
+    dt = cfg["dingtalk"]
+    async with httpx.AsyncClient() as client:
+        ok, err = await _dingtalk_send(
+            client, dt["webhook"], dt["secret"],
+            f"【sub2report 测试】钉钉告警通道正常 · {datetime.now().isoformat(timespec='seconds')}",
+        )
+    return {"ok": ok} if ok else {"ok": False, "error": err}
+
+
+async def _evaluate_alerts() -> list[str]:
+    """跑一遍规则，返回触发的告警文案列表（不发送）。"""
+    cfg = _load_alerts()
+    rules = cfg["rules"]
+    msgs = []
+    # SLA / 错误率：复用 ops overview
+    sem = asyncio.Semaphore(OPS_MAX_PARALLEL)
+    async with httpx.AsyncClient(timeout=25) as client:
+        sites = _load_sites()
+        ops = await asyncio.gather(*[
+            _fetch_station_ops(client, sem, s["name"], s["base_url"], s["email"], s["password"], "1h")
+            for s in sites
+        ], return_exceptions=True)
+        for r in ops:
+            if not isinstance(r, dict) or not r.get("ok"):
+                continue
+            m = r.get("metrics") or {}
+            nm = r.get("name")
+            sla = m.get("sla_percent")
+            er = m.get("error_rate_percent")
+            ur = m.get("upstream_error_rate_percent")
+            if sla is not None and sla < rules["sla_min"]:
+                msgs.append(f"[{nm}] SLA {sla:.2f}% < {rules['sla_min']}%")
+            if er is not None and er > rules["error_rate_max"]:
+                msgs.append(f"[{nm}] 请求错误率 {er:.2f}% > {rules['error_rate_max']}%")
+            if ur is not None and ur > rules["upstream_rate_max"]:
+                msgs.append(f"[{nm}] 上游错误率 {ur:.2f}% > {rules['upstream_rate_max']}%")
+        # 账号池：用 stats normal_accounts
+        async def _acct(s):
+            try:
+                jwt = await _login(client, s["base_url"], s["email"], s["password"])
+                ok, data = await _get_json(client, s["base_url"], jwt, "/api/v1/admin/dashboard/stats")
+                if ok and isinstance(data, dict):
+                    return s["name"], _gnum(data.get("normal_accounts"))
+            except Exception:
+                pass
+            return s["name"], None
+        accts = await asyncio.gather(*[_acct(s) for s in sites])
+        for nm, n in accts:
+            if n is not None and n < rules["normal_accounts_min"]:
+                msgs.append(f"[{nm}] 正常账号数 {int(n)} < {int(rules['normal_accounts_min'])}")
+    return msgs
+
+
+@app.post("/api/alert-check")
+async def post_alert_check(request: Request):
+    """立即检查（不一定发送）。?send=1 时把命中的告警推到钉钉。"""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    send = bool((payload or {}).get("send"))
+    msgs = await _evaluate_alerts()
+    sent = False
+    err = ""
+    if send and msgs:
+        cfg = _load_alerts()
+        async with httpx.AsyncClient() as client:
+            ok, err = await _dingtalk_send(
+                client, cfg["dingtalk"]["webhook"], cfg["dingtalk"]["secret"],
+                "【sub2report 告警】\n" + "\n".join(msgs),
+            )
+            sent = ok
+    return {"ok": True, "alerts": msgs, "count": len(msgs), "sent": sent, "error": err}
+
+
+async def _alert_loop():
+    """后台轮询：仅当 enabled 且配置了 webhook 时才检查并推送；带冷却去重。"""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            cfg = _load_alerts()
+            if cfg["enabled"] and cfg["dingtalk"]["webhook"]:
+                msgs = await _evaluate_alerts()
+                now = time.time()
+                fresh = [m for m in msgs if now - _alert_last_sent.get(m, 0) > ALERT_COOLDOWN_S]
+                if fresh:
+                    async with httpx.AsyncClient() as client:
+                        ok, _ = await _dingtalk_send(
+                            client, cfg["dingtalk"]["webhook"], cfg["dingtalk"]["secret"],
+                            "【sub2report 告警】\n" + "\n".join(fresh),
+                        )
+                    if ok:
+                        for m in fresh:
+                            _alert_last_sent[m] = now
+        except Exception:
+            pass
+        await asyncio.sleep(300)  # 每 5 分钟
+
+
+@app.on_event("startup")
+async def _start_alert_loop():
+    asyncio.create_task(_alert_loop())

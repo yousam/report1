@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>推送告警（钉钉）</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:#f5f7fa;color:#333;min-height:100vh}
+  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center}
+  .header h1{font-size:18px;font-weight:600}
+  .container{max-width:900px;margin:0 auto;padding:20px}
+  .card{background:#fff;border-radius:8px;padding:18px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  .card h2{font-size:14px;font-weight:600;margin-bottom:6px}
+  .hint{font-size:12px;color:#909399;display:block;margin-bottom:14px}
+  .fi{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+  .fi label{font-size:13px;color:#606266;font-weight:500}
+  .fi input[type=text],.fi input[type=password]{height:36px;padding:0 12px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;outline:none;width:100%}
+  .row{display:flex;gap:18px;flex-wrap:wrap}
+  .row .fi{flex:1;min-width:160px}
+  .row .fi input[type=number]{height:34px;padding:0 10px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;outline:none;width:120px}
+  .btn{height:36px;padding:0 18px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#409eff;color:#fff}
+  .btn:disabled{background:#a0cfff}
+  .btn-ghost{background:#fff;color:#606266;border:1px solid #dcdfe6}
+  .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px}
+  .meta{color:#909399;font-size:12px}
+  .ok{color:#1f9550}.bad{color:#f56c6c}
+  .switch{display:flex;align-items:center;gap:8px;font-size:13px}
+  pre{background:#fafbfc;border:1px solid #ebeef5;border-radius:6px;padding:10px 12px;font-size:12px;white-space:pre-wrap;word-break:break-all;margin-top:8px}
+</style>
+</head>
+<body>
+  <div class="header"><h1>推送告警（钉钉）</h1></div>
+  <div class="container">
+    <div class="card">
+      <h2>钉钉机器人</h2>
+      <span class="hint">配置存服务器(/data/alerts.json，不入库)。webhook/secret 已设置后不回显——留空表示不修改。机器人安全设置建议用「加签」，把 secret 填到下面。</span>
+      <div class="fi"><label>Webhook 地址 <span id="whState" class="meta"></span></label><input type="password" id="webhook" autocomplete="new-password" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."></div>
+      <div class="fi"><label>加签 Secret（可选） <span id="secState" class="meta"></span></label><input type="password" id="secret" autocomplete="new-password" placeholder="SEC 开头的加签密钥，无则留空"></div>
+      <label class="switch"><input type="checkbox" id="enabled"> 启用后台自动检查并推送（每 5 分钟，10 分钟内同条告警不重复）</label>
+    </div>
+
+    <div class="card">
+      <h2>告警阈值</h2>
+      <span class="hint">命中即推送。SLA 低于、错误率高于、可用账号数低于即触发。</span>
+      <div class="row">
+        <div class="fi"><label>SLA 低于(%)</label><input type="number" id="sla_min" step="0.1"></div>
+        <div class="fi"><label>请求错误率高于(%)</label><input type="number" id="error_rate_max" step="0.1"></div>
+        <div class="fi"><label>上游错误率高于(%)</label><input type="number" id="upstream_rate_max" step="0.1"></div>
+        <div class="fi"><label>正常账号数低于</label><input type="number" id="normal_accounts_min" step="1"></div>
+      </div>
+      <div class="actions">
+        <button class="btn" id="saveBtn">保存</button>
+        <button class="btn btn-ghost" id="testBtn">测试推送</button>
+        <button class="btn btn-ghost" id="checkBtn">立即检查（不发送）</button>
+        <span class="meta" id="meta"></span>
+      </div>
+      <pre id="out" style="display:none"></pre>
+    </div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+async function loadCfg(){
+  try{
+    const d=await(await fetch("/api/alert-config")).json();
+    $("enabled").checked=!!d.enabled;
+    const r=d.rules||{};
+    ["sla_min","error_rate_max","upstream_rate_max","normal_accounts_min"].forEach(k=>{if(r[k]!=null)$(k).value=r[k];});
+    $("whState").textContent=d.dingtalk&&d.dingtalk.has_webhook?"（已设置，留空不改）":"（未设置）";
+    $("secState").textContent=d.dingtalk&&d.dingtalk.has_secret?"（已设置，留空不改）":"（未设置）";
+  }catch(e){$("meta").textContent="加载配置失败: "+e;}
+}
+async function save(){
+  const body={enabled:$("enabled").checked,
+    rules:{sla_min:+$("sla_min").value,error_rate_max:+$("error_rate_max").value,upstream_rate_max:+$("upstream_rate_max").value,normal_accounts_min:+$("normal_accounts_min").value},
+    dingtalk:{webhook:$("webhook").value.trim(),secret:$("secret").value.trim()}};
+  const btn=$("saveBtn");btn.disabled=true;btn.textContent="保存中…";
+  try{
+    const d=await(await fetch("/api/alert-config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
+    if(d.ok){$("meta").innerHTML='<span class="ok">已保存</span>';$("webhook").value="";$("secret").value="";await loadCfg();}
+    else $("meta").innerHTML='<span class="bad">'+(d.error||"保存失败")+'</span>';
+  }catch(e){$("meta").innerHTML='<span class="bad">请求失败: '+e+'</span>';}
+  finally{btn.disabled=false;btn.textContent="保存";}
+}
+async function test(){
+  $("meta").textContent="发送测试…";
+  try{const d=await(await fetch("/api/alert-test",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})).json();
+    $("meta").innerHTML=d.ok?'<span class="ok">测试推送成功，去钉钉看消息</span>':'<span class="bad">'+(d.error||"失败")+'</span>';}
+  catch(e){$("meta").innerHTML='<span class="bad">请求失败: '+e+'</span>';}
+}
+async function check(){
+  $("meta").textContent="检查中…";const out=$("out");
+  try{const d=await(await fetch("/api/alert-check",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})).json();
+    $("meta").textContent="命中 "+(d.count||0)+" 条";
+    out.style.display="";out.textContent=(d.alerts&&d.alerts.length)?d.alerts.join("\n"):"当前无告警 ✓";}
+  catch(e){$("meta").innerHTML='<span class="bad">请求失败: '+e+'</span>';}
+}
+$("saveBtn").onclick=save;$("testBtn").onclick=test;$("checkBtn").onclick=check;
+loadCfg();
+</script>
+</body>
+</html>

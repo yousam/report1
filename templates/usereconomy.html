@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>用户经济看板</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:#f5f7fa;color:#333;min-height:100vh}
+  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center}
+  .header h1{font-size:18px;font-weight:600}
+  .container{max-width:1500px;margin:0 auto;padding:20px}
+  .card{background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  .card h2{font-size:14px;font-weight:600;margin-bottom:12px}
+  .actions{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+  .fi{display:flex;flex-direction:column;gap:5px}
+  .fi label{font-size:12px;color:#606266}
+  .fi input,.fi select{height:34px;padding:0 10px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;outline:none;background:#fff}
+  .fi input{width:110px}
+  .btn{height:34px;padding:0 18px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#409eff;color:#fff}
+  .btn:disabled{background:#a0cfff}
+  .meta{color:#909399;font-size:12px}
+  .err{color:#f56c6c;font-size:13px;margin-top:8px;display:none}
+  .cards{display:flex;gap:14px;flex-wrap:wrap}
+  .stat{flex:1;min-width:140px;background:#fafbfc;border:1px solid #ebeef5;border-radius:8px;padding:12px 14px}
+  .stat .v{font-size:24px;font-weight:700;color:#1a1a1a}
+  .stat .l{font-size:12px;color:#909399;margin-top:2px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}
+  table.t{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+  table.t th{background:#fafafa;color:#606266;font-weight:600;padding:7px 10px;text-align:right;border-bottom:2px solid #ebeef5}
+  table.t th.l,table.t td.l{text-align:left}
+  table.t td{padding:6px 10px;text-align:right;border-bottom:1px solid #f0f2f5}
+  .dt-scroll{max-height:360px;overflow:auto}
+  .muted{color:#c0c4cc}.r{color:#f56c6c;font-weight:600}
+</style>
+</head>
+<body>
+  <div class="header"><h1>用户经济看板</h1></div>
+  <div class="container">
+    <div class="card">
+      <div class="actions">
+        <div class="fi"><label>站点</label><select id="site" style="width:180px"></select></div>
+        <div class="fi"><label>余额不足阈值($)</label><input type="number" id="low" value="5" step="1" min="0"></div>
+        <div class="fi"><label>流失天数(有余额未活跃)</label><input type="number" id="churn" value="14" step="1" min="1"></div>
+        <div class="fi"><label>新增用户天数</label><input type="number" id="new" value="7" step="1" min="1"></div>
+        <button class="btn" id="queryBtn">查询</button>
+        <span class="meta" id="meta"></span>
+      </div>
+      <div class="err" id="err"></div>
+    </div>
+
+    <div class="card" id="sumCard" style="display:none">
+      <div class="cards" id="sum"></div>
+    </div>
+
+    <div class="grid">
+      <div class="card"><h2>余额不足</h2><div class="dt-scroll"><table class="t"><thead><tr><th class="l">用户</th><th>余额$</th></tr></thead><tbody id="lowBody"></tbody></table></div></div>
+      <div class="card"><h2>流失(有余额久未活跃)</h2><div class="dt-scroll"><table class="t"><thead><tr><th class="l">用户</th><th>余额$</th><th class="l">最近活跃</th></tr></thead><tbody id="churnBody"></tbody></table></div></div>
+      <div class="card"><h2>新增用户</h2><div class="dt-scroll"><table class="t"><thead><tr><th class="l">用户</th><th class="l">注册时间</th><th>累计充值$</th></tr></thead><tbody id="newBody"></tbody></table></div></div>
+      <div class="card"><h2>Top 消费(近30天)</h2><div class="dt-scroll"><table class="t"><thead><tr><th class="l">用户</th><th>实收$</th><th>请求</th><th>Token</th></tr></thead><tbody id="topBody"></tbody></table></div></div>
+    </div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ni=v=>v==null?'-':Number(v).toLocaleString();
+const nf=(v,d)=>v==null?'-':Number(v).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
+const ft=s=>{if(!s)return'-';return String(s).replace("T"," ").replace(/\..*$/,"").slice(0,19);};
+const LS="sub2report_ue_site";
+
+async function loadSites(){
+  const sel=$("site");
+  try{const r=await fetch("/api/sites");const d=await r.json();const saved=localStorage.getItem(LS)||"";
+    let h='<option value="">(选择站点)</option>';(d.sites||[]).forEach(s=>{h+='<option value="'+esc(s.name)+'"'+(s.name===saved?' selected':'')+'>'+esc(s.name)+'</option>';});sel.innerHTML=h;
+  }catch(e){sel.innerHTML='<option value="">(加载失败)</option>';}
+}
+function fillTable(id,rows,fn){const b=$(id);b.innerHTML="";if(!rows||!rows.length){b.innerHTML='<tr><td class="l muted" colspan="4">无</td></tr>';return;}rows.forEach(r=>{const tr=document.createElement("tr");tr.innerHTML=fn(r);b.appendChild(tr);});}
+async function query(){
+  const site=$("site").value;const err=$("err");err.style.display="none";
+  if(!site){err.textContent="请选择站点";err.style.display="block";return;}
+  localStorage.setItem(LS,site);
+  const btn=$("queryBtn");btn.disabled=true;btn.textContent="查询中…";
+  try{
+    const resp=await fetch("/api/user-economy",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({site,low_balance:+$("low").value,churn_days:+$("churn").value,new_days:+$("new").value})});
+    const d=await resp.json();
+    if(!d.ok){err.textContent=d.error||"查询失败";err.style.display="block";return;}
+    const s=d.summary;
+    $("sumCard").style.display="";
+    $("sum").innerHTML=
+      '<div class="stat"><div class="v">'+ni(s.total_users)+'</div><div class="l">总用户</div></div>'+
+      '<div class="stat"><div class="v">'+nf(s.total_balance,2)+'</div><div class="l">余额合计$</div></div>'+
+      '<div class="stat"><div class="v">'+nf(s.total_recharged,2)+'</div><div class="l">累计充值$</div></div>'+
+      '<div class="stat"><div class="v r">'+ni(s.low_count)+'</div><div class="l">余额不足</div></div>'+
+      '<div class="stat"><div class="v">'+ni(s.churn_count)+'</div><div class="l">疑似流失</div></div>'+
+      '<div class="stat"><div class="v">'+ni(s.new_count)+'</div><div class="l">新增用户</div></div>';
+    fillTable("lowBody",d.low_balance,r=>'<td class="l">'+esc(r.email)+'</td><td class="r">'+nf(r.balance,2)+'</td>');
+    fillTable("churnBody",d.churn,r=>'<td class="l">'+esc(r.email)+'</td><td>'+nf(r.balance,2)+'</td><td class="l">'+ft(r.last_active)+'</td>');
+    fillTable("newBody",d.new_users,r=>'<td class="l">'+esc(r.email)+'</td><td class="l">'+ft(r.created_at)+'</td><td>'+nf(r.total_recharged,2)+'</td>');
+    fillTable("topBody",d.top_spend,r=>'<td class="l">'+esc(r.email)+'</td><td>'+nf(r.actual_cost,2)+'</td><td>'+ni(r.requests)+'</td><td>'+ni(r.tokens)+'</td>');
+    $("meta").textContent="更新于 "+(d.server_time||"").replace("T"," ");
+  }catch(e){err.textContent="请求失败: "+e;err.style.display="block";}
+  finally{btn.disabled=false;btn.textContent="查询";}
+}
+$("queryBtn").onclick=query;
+loadSites();
+</script>
+</body>
+</html>
