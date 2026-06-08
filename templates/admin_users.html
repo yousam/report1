@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>人员管理 · sub2report</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:#f5f7fa;color:#333}
+  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between}
+  .header h1{font-size:18px;font-weight:600}.header a{color:#409eff;text-decoration:none;font-size:13px}
+  .container{max-width:1200px;margin:0 auto;padding:20px}
+  .card{background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{background:#fafafa;color:#606266;text-align:left;padding:8px 10px;border-bottom:2px solid #ebeef5}
+  td{padding:8px 10px;border-bottom:1px solid #f0f2f5}
+  .btn{height:32px;padding:0 14px;border:none;border-radius:6px;font-size:13px;cursor:pointer;background:#409eff;color:#fff}
+  .btn-ghost{background:#fff;color:#606266;border:1px solid #dcdfe6}
+  .btn-del{background:#fff;color:#f56c6c;border:1px solid #fbc4c4;height:28px;padding:0 10px;border-radius:6px;cursor:pointer;font-size:12px}
+  .btn-sm{height:28px;padding:0 10px;border-radius:6px;font-size:12px;cursor:pointer;background:#fff;color:#409eff;border:1px solid #b3d8ff}
+  .fi{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+  .fi label{font-size:12px;color:#606266}
+  .fi input,.fi select{height:34px;padding:0 10px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;outline:none}
+  .roles{display:flex;gap:14px;flex-wrap:wrap;font-size:13px}
+  .panel{display:none}.panel.show{display:block}
+  .meta{color:#909399;font-size:12px;margin-left:10px}
+  .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:#eef5ff;color:#409eff;margin-right:4px}
+  .disabled{color:#f56c6c}
+</style>
+</head>
+<body>
+  <div class="header"><h1>人员管理</h1><div><a href="/portal">← 门户</a> &nbsp; <a href="/logout">退出</a></div></div>
+  <div class="container">
+    <div class="card">
+      <button class="btn" id="addBtn">+ 新增用户</button>
+      <span class="meta" id="meta"></span>
+      <div class="panel" id="panel" style="margin-top:14px;border-top:1px solid #f0f2f5;padding-top:14px">
+        <input type="hidden" id="f-id">
+        <div class="fi"><label>邮箱（登录名）</label><input type="email" id="f-email" style="width:280px"></div>
+        <div class="fi"><label>显示名</label><input type="text" id="f-name" style="width:280px"></div>
+        <div class="fi"><label id="pwd-label">密码（至少6位）</label><input type="password" id="f-pwd" autocomplete="new-password" style="width:280px"></div>
+        <div class="fi"><label>状态</label><select id="f-status" style="width:120px"><option value="active">启用</option><option value="disabled">停用</option></select></div>
+        <div class="fi"><label>角色</label><div class="roles" id="f-roles"></div></div>
+        <button class="btn" id="saveBtn">保存</button>
+        <button class="btn-ghost" id="cancelBtn">取消</button>
+        <span class="meta" id="formMsg"></span>
+      </div>
+    </div>
+    <div class="card">
+      <table><thead><tr><th>ID</th><th>邮箱</th><th>显示名</th><th>角色</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead>
+      <tbody id="body"></tbody></table>
+    </div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ft=s=>s?String(s).replace("T"," ").slice(0,19):"-";
+let ROLES=[];
+async function load(){
+  const d=await(await fetch("/api/admin/users")).json();
+  ROLES=d.roles||[];
+  const b=$("body");b.innerHTML="";
+  (d.users||[]).forEach(u=>{
+    const roles=(u.roles||[]).map(r=>'<span class="badge">'+esc(r)+'</span>').join("")||'<span class="meta">无</span>';
+    const tr=document.createElement("tr");
+    tr.innerHTML='<td>'+u.id+'</td><td>'+esc(u.email)+'</td><td>'+esc(u.display_name||"")+'</td><td>'+roles+'</td>'+
+      '<td class="'+(u.status==="active"?"":"disabled")+'">'+(u.status==="active"?"启用":"停用")+'</td>'+
+      '<td>'+ft(u.last_login_at)+'</td>'+
+      '<td><button class="btn-sm" onclick=\'edit('+JSON.stringify(u).replace(/'/g,"&#39;")+')\'>编辑</button> '+
+      '<button class="btn-del" onclick="del('+u.id+',\''+esc(u.email)+'\')">删除</button></td>';
+    b.appendChild(tr);
+  });
+}
+function roleCheckboxes(checked){
+  return ROLES.map(r=>'<label><input type="checkbox" value="'+r.id+'"'+((checked||[]).includes(r.name)?' checked':'')+'> '+esc(r.name)+'</label>').join("");
+}
+function showPanel(){$("panel").classList.add("show");}
+function hidePanel(){$("panel").classList.remove("show");$("formMsg").textContent="";}
+$("addBtn").onclick=()=>{
+  $("f-id").value="";$("f-email").value="";$("f-email").disabled=false;$("f-name").value="";$("f-pwd").value="";
+  $("pwd-label").textContent="密码（至少6位）";$("f-status").value="active";$("f-roles").innerHTML=roleCheckboxes([]);showPanel();
+};
+window.edit=(u)=>{
+  $("f-id").value=u.id;$("f-email").value=u.email;$("f-email").disabled=true;$("f-name").value=u.display_name||"";
+  $("f-pwd").value="";$("pwd-label").textContent="重置密码（留空=不改）";$("f-status").value=u.status;
+  $("f-roles").innerHTML=roleCheckboxes(u.roles||[]);showPanel();
+};
+$("cancelBtn").onclick=hidePanel;
+$("saveBtn").onclick=async()=>{
+  const id=$("f-id").value;
+  const role_ids=[...$("f-roles").querySelectorAll("input:checked")].map(x=>+x.value);
+  const pwd=$("f-pwd").value;
+  let resp;
+  if(id){
+    const body={display_name:$("f-name").value,status:$("f-status").value,role_ids};
+    if(pwd)body.password=pwd;
+    resp=await fetch("/api/admin/users/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  }else{
+    resp=await fetch("/api/admin/users",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({email:$("f-email").value.trim(),password:pwd,display_name:$("f-name").value,role_ids})});
+  }
+  const d=await resp.json();
+  if(d.ok){hidePanel();load();}else $("formMsg").textContent=d.error||"保存失败";
+};
+window.del=async(id,email)=>{
+  if(!confirm("删除用户 "+email+" ?"))return;
+  const d=await(await fetch("/api/admin/users/"+id,{method:"DELETE"})).json();
+  if(d.ok)load();else alert(d.error||"删除失败");
+};
+load();
+</script>
+</body>
+</html>

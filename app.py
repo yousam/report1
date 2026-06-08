@@ -17,62 +17,35 @@ import httpx
 # 因此这里直接读字符串里的 HH，不做额外时区平移 —— 平移过会把已经是北京时间
 # 的桶再加 8 小时，导致整张图错位。
 from fastapi import FastAPI, Form, Request
+from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+
+import db
+import auth
 
 app = FastAPI(title="sub2report", docs_url=None, redoc_url=None)
 templates = Jinja2Templates(directory="templates")
-
-# ---------------- 站点配置中心 (sites.json) ----------------
-# 所有页面用到的站点凭证(站点名/baseURL/管理员邮箱/管理员密码)集中存这里，由
-# /settingsites 界面管理。文件路径用 SITES_FILE 指定，默认 /data/sites.json，
-# 该路径在容器里是一个宿主机 bind mount，重建镜像不丢；且不在代码仓库内，不会被推上 GitHub。
-SITES_FILE = os.getenv("SITES_FILE", "/data/sites.json")
-_sites_lock = threading.Lock()
+app.add_middleware(auth.AuthMiddleware)
+app.include_router(auth.router)
 
 
-def _load_sites() -> list[dict]:
-    """读取站点配置；文件不存在/损坏都返回 []，绝不抛异常。"""
-    try:
-        with open(SITES_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, ValueError, OSError):
-        return []
-    if not isinstance(data, list):
-        return []
-    out = []
-    for s in data:
-        if not isinstance(s, dict):
-            continue
-        name = str(s.get("name", "")).strip()
-        if not name:
-            continue
-        out.append({
-            "name": name,
-            "base_url": str(s.get("base_url", "")).strip().rstrip("/"),
-            "email": str(s.get("email", "")).strip(),
-            "password": str(s.get("password", "")),
-        })
-    return out
+@app.on_event("startup")
+async def _startup_db():
+    await db.init_db()
 
 
-def _save_sites(sites: list[dict]) -> None:
-    """原子写入站点配置（先写临时文件再 rename）。"""
-    os.makedirs(os.path.dirname(SITES_FILE) or ".", exist_ok=True)
-    tmp = SITES_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(sites, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, SITES_FILE)
+@app.on_event("shutdown")
+async def _shutdown_db():
+    await db.close()
 
 
-def _find_site(name: str) -> dict | None:
-    """按站点名大小写不敏感精确匹配，返回完整(含密码)的站点配置。"""
-    target = (name or "").strip().lower()
-    if not target:
-        return None
-    for s in _load_sites():
-        if s["name"].lower() == target:
-            return s
-    return None
+# ---------------- 站点配置中心（已并入 PG sites 表，对外契约不变） ----------------
+async def _load_sites() -> list[dict]:
+    return await db.sites_list()
+
+
+async def _find_site(name: str) -> dict | None:
+    return await db.site_find(name)
 
 
 @app.get("/settingsites")
@@ -90,7 +63,7 @@ async def get_sites():
             "email": s["email"],
             "has_password": bool(s["password"]),
         }
-        for s in _load_sites()
+        for s in await _load_sites()
     ]
     return {"ok": True, "sites": sites}
 
@@ -106,34 +79,33 @@ async def post_sites(request: Request):
     if not isinstance(rows, list):
         return {"ok": False, "error": "sites 必须是数组"}
 
-    with _sites_lock:
-        old_by_name = {s["name"].lower(): s for s in _load_sites()}
-        out: list[dict] = []
-        seen: set[str] = set()
-        for r in rows:
-            if not isinstance(r, dict):
-                continue
-            name = str(r.get("name", "")).strip()
-            if not name:
-                return {"ok": False, "error": "存在空的站点名称"}
-            key = name.lower()
-            if key in seen:
-                return {"ok": False, "error": f"站点名称重复: {name}"}
-            seen.add(key)
-            pwd = str(r.get("password", ""))
-            if not pwd:  # 留空 → 沿用旧密码
-                old = old_by_name.get(key)
-                pwd = old["password"] if old else ""
-            out.append({
-                "name": name,
-                "base_url": str(r.get("base_url", "")).strip().rstrip("/"),
-                "email": str(r.get("email", "")).strip(),
-                "password": pwd,
-            })
-        try:
-            _save_sites(out)
-        except OSError as e:
-            return {"ok": False, "error": f"写入失败: {e}"}
+    old_by_name = {s["name"].lower(): s for s in await _load_sites()}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name", "")).strip()
+        if not name:
+            return {"ok": False, "error": "存在空的站点名称"}
+        key = name.lower()
+        if key in seen:
+            return {"ok": False, "error": f"站点名称重复: {name}"}
+        seen.add(key)
+        pwd = str(r.get("password", ""))
+        if not pwd:  # 留空 → 沿用旧密码
+            old = old_by_name.get(key)
+            pwd = old["password"] if old else ""
+        out.append({
+            "name": name,
+            "base_url": str(r.get("base_url", "")).strip().rstrip("/"),
+            "email": str(r.get("email", "")).strip(),
+            "password": pwd,
+        })
+    try:
+        await db.sites_replace(out)
+    except Exception as e:
+        return {"ok": False, "error": f"写入失败: {e}"}
     return {"ok": True, "count": len(out)}
 
 
@@ -145,7 +117,7 @@ async def post_site_test(request: Request):
     except Exception:
         return {"ok": False, "error": "请求体必须是 JSON"}
     name = str((payload or {}).get("name", "")).strip()
-    site = _find_site(name)
+    site = await _find_site(name)
     if not site:
         return {"ok": False, "error": f"未找到站点: {name}"}
     if not site["base_url"] or not site["email"] or not site["password"]:
@@ -439,7 +411,7 @@ async def post_report(
         except ValueError:
             return {"error": "Invalid date format, use YYYY-MM-DD"}
 
-    st = _find_site(site)
+    st = await _find_site(site)
     if not st:
         return {"error": f"未找到站点: {site}"}
     base_url = st["base_url"]
@@ -695,7 +667,7 @@ async def post_ops_aggregate(request: Request):
 
     # names 省略或为空 → 查全部已配置站点；否则按名筛选（保持给定顺序）
     names = payload.get("names") if isinstance(payload, dict) else None
-    all_sites = _load_sites()
+    all_sites = await _load_sites()
     if isinstance(names, list) and names:
         wanted = [str(n).strip().lower() for n in names if str(n).strip()]
         by_name = {s["name"].lower(): s for s in all_sites}
@@ -952,7 +924,7 @@ async def post_ops_detail(request: Request):
         return {"error": "请求体格式错误"}
 
     name = str(payload.get("name", "")).strip()
-    st = _find_site(name)
+    st = await _find_site(name)
     if not st:
         return {"error": f"未找到站点: {name}"}
     if not st["base_url"]:
@@ -1180,7 +1152,7 @@ async def post_finance(request: Request):
         if not isinstance(u, dict):
             continue
         station_name = str(u.get("station_name", "")).strip()
-        st = _find_site(station_name)
+        st = await _find_site(station_name)
         enriched.append({
             "key": u.get("key"),
             "station_name": station_name,
@@ -1202,9 +1174,9 @@ async def usage_cn_search_page(request: Request):
     return templates.TemplateResponse("usagecnsearch.html", {"request": request})
 
 
-def _cn_site() -> dict | None:
+async def _cn_site() -> dict | None:
     """取站点配置里名为 'CN' 的站点（usagecnsearch 默认用它）。"""
-    return _find_site("CN")
+    return await _find_site("CN")
 
 
 async def _cn_find_user(client: httpx.AsyncClient, base_url: str, jwt: str, email: str) -> dict | None:
@@ -1237,7 +1209,7 @@ async def post_usage_cn_search(request: Request):
     if not email:
         return {"ok": False, "error": "请输入用户邮箱"}
 
-    site = _cn_site()
+    site = await _cn_site()
     if not site or not site["base_url"]:
         return {"ok": False, "error": "未配置名为 CN 的站点，请到「站点配置」添加"}
     cn_base, cn_email, cn_pass = site["base_url"], site["email"], site["password"]
@@ -1306,7 +1278,7 @@ async def post_usage_cn_recharge(request: Request):
     if not email:
         return {"ok": False, "error": "请输入用户邮箱"}
 
-    site = _cn_site()
+    site = await _cn_site()
     if not site or not site["base_url"]:
         return {"ok": False, "error": "未配置名为 CN 的站点，请到「站点配置」添加"}
     cn_base, cn_email, cn_pass = site["base_url"], site["email"], site["password"]
@@ -1405,7 +1377,7 @@ def _gnum(v):
 async def _fanout_sites(fn, names=None):
     """对所有(或指定)已配置站点并发执行 fn(client, site)，每站返回一个 dict。
     单站异常不影响整体。"""
-    sites = _load_sites()
+    sites = await _load_sites()
     if names:
         wanted = {str(n).strip().lower() for n in names if str(n).strip()}
         sites = [s for s in sites if s["name"].lower() in wanted]
@@ -1580,7 +1552,7 @@ async def post_user_economy(request: Request):
     except Exception:
         return {"ok": False, "error": "请求体必须是 JSON"}
     name = str((payload or {}).get("site", "")).strip()
-    site = _find_site(name)
+    site = await _find_site(name)
     if not site or not site["base_url"]:
         return {"ok": False, "error": f"未找到站点: {name}"}
     low_thr = _gnum((payload or {}).get("low_balance", 5))
@@ -1821,8 +1793,6 @@ async def post_model_profit(request: Request):
 #   含钉钉机器人 webhook + 加签 secret(可选) + 阈值规则 + 开关。
 #   webhook/secret 不回显(只标 has_*)；保存时留空=不修改。
 # ============================================================================
-ALERTS_FILE = os.getenv("ALERTS_FILE", "/data/alerts.json")
-_alerts_lock = threading.Lock()
 _alert_last_sent: dict[str, float] = {}
 ALERT_COOLDOWN_S = 600  # 同一条告警 10 分钟内不重复推送
 
@@ -1834,12 +1804,9 @@ _DEFAULT_ALERT_RULES = {
 }
 
 
-def _load_alerts() -> dict:
-    try:
-        with open(ALERTS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, ValueError, OSError):
-        data = {}
+async def _load_alerts() -> dict:
+    """告警配置已并入 PG settings['alerts']。"""
+    data = await db.settings_get("alerts", {}) or {}
     if not isinstance(data, dict):
         data = {}
     dt = data.get("dingtalk") or {}
@@ -1851,12 +1818,8 @@ def _load_alerts() -> dict:
     }
 
 
-def _save_alerts(cfg: dict) -> None:
-    os.makedirs(os.path.dirname(ALERTS_FILE) or ".", exist_ok=True)
-    tmp = ALERTS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, ALERTS_FILE)
+async def _save_alerts(cfg: dict) -> None:
+    await db.settings_set("alerts", cfg)
 
 
 def _dingtalk_sign(secret: str, ts: str) -> str:
@@ -1891,7 +1854,7 @@ async def alertpush_page(request: Request):
 
 @app.get("/api/alert-config")
 async def get_alert_config():
-    cfg = _load_alerts()
+    cfg = await _load_alerts()
     dt = cfg["dingtalk"]
     return {
         "ok": True,
@@ -1909,29 +1872,28 @@ async def post_alert_config(request: Request):
         return {"ok": False, "error": "请求体必须是 JSON"}
     if not isinstance(payload, dict):
         return {"ok": False, "error": "请求体格式错误"}
-    with _alerts_lock:
-        cur = _load_alerts()
-        cur["enabled"] = bool(payload.get("enabled", cur["enabled"]))
-        rules_in = payload.get("rules") or {}
-        for k in _DEFAULT_ALERT_RULES:
-            if k in rules_in:
-                cur["rules"][k] = _gnum(rules_in[k])
-        dt_in = payload.get("dingtalk") or {}
-        # 留空=不改
-        if str(dt_in.get("webhook", "")).strip():
-            cur["dingtalk"]["webhook"] = str(dt_in["webhook"]).strip()
-        if str(dt_in.get("secret", "")).strip():
-            cur["dingtalk"]["secret"] = str(dt_in["secret"]).strip()
-        try:
-            _save_alerts(cur)
-        except OSError as e:
-            return {"ok": False, "error": f"写入失败: {e}"}
+    cur = await _load_alerts()
+    cur["enabled"] = bool(payload.get("enabled", cur["enabled"]))
+    rules_in = payload.get("rules") or {}
+    for k in _DEFAULT_ALERT_RULES:
+        if k in rules_in:
+            cur["rules"][k] = _gnum(rules_in[k])
+    dt_in = payload.get("dingtalk") or {}
+    # 留空=不改
+    if str(dt_in.get("webhook", "")).strip():
+        cur["dingtalk"]["webhook"] = str(dt_in["webhook"]).strip()
+    if str(dt_in.get("secret", "")).strip():
+        cur["dingtalk"]["secret"] = str(dt_in["secret"]).strip()
+    try:
+        await _save_alerts(cur)
+    except Exception as e:
+        return {"ok": False, "error": f"写入失败: {e}"}
     return {"ok": True}
 
 
 @app.post("/api/alert-test")
 async def post_alert_test(request: Request):
-    cfg = _load_alerts()
+    cfg = await _load_alerts()
     dt = cfg["dingtalk"]
     async with httpx.AsyncClient() as client:
         ok, err = await _dingtalk_send(
@@ -1943,13 +1905,13 @@ async def post_alert_test(request: Request):
 
 async def _evaluate_alerts() -> list[str]:
     """跑一遍规则，返回触发的告警文案列表（不发送）。"""
-    cfg = _load_alerts()
+    cfg = await _load_alerts()
     rules = cfg["rules"]
     msgs = []
     # SLA / 错误率：复用 ops overview
     sem = asyncio.Semaphore(OPS_MAX_PARALLEL)
     async with httpx.AsyncClient(timeout=25) as client:
-        sites = _load_sites()
+        sites = await _load_sites()
         ops = await asyncio.gather(*[
             _fetch_station_ops(client, sem, s["name"], s["base_url"], s["email"], s["password"], "1h")
             for s in sites
@@ -1997,7 +1959,7 @@ async def post_alert_check(request: Request):
     sent = False
     err = ""
     if send and msgs:
-        cfg = _load_alerts()
+        cfg = await _load_alerts()
         async with httpx.AsyncClient() as client:
             ok, err = await _dingtalk_send(
                 client, cfg["dingtalk"]["webhook"], cfg["dingtalk"]["secret"],
@@ -2012,7 +1974,7 @@ async def _alert_loop():
     await asyncio.sleep(20)
     while True:
         try:
-            cfg = _load_alerts()
+            cfg = await _load_alerts()
             if cfg["enabled"] and cfg["dingtalk"]["webhook"]:
                 msgs = await _evaluate_alerts()
                 now = time.time()
@@ -2034,3 +1996,173 @@ async def _alert_loop():
 @app.on_event("startup")
 async def _start_alert_loop():
     asyncio.create_task(_alert_loop())
+
+
+# ============================================================================
+# 门户 + 后台管理（人员/角色/菜单/审计）。登录与权限由 auth.AuthMiddleware 统一拦截。
+# ============================================================================
+@app.get("/")
+async def root_redirect(request: Request):
+    return RedirectResponse(url="/portal", status_code=302)
+
+
+@app.get("/portal")
+async def portal_page(request: Request):
+    user = auth.current_user(request)
+    perms = request.state.perms
+    menus = await db.menus_list()
+    groups: dict[str, list] = {}
+    for m in menus:
+        if not m["enabled"]:
+            continue
+        if m["perm_code"] and m["perm_code"] not in perms:
+            continue
+        groups.setdefault(m["grp"] or "其它", []).append(m)
+    # 保持分组顺序：报表 → 管理 → 其它
+    order = ["报表", "管理", "其它"]
+    grouped = [(g, groups[g]) for g in order if g in groups] + [(g, v) for g, v in groups.items() if g not in order]
+    return templates.TemplateResponse("portal.html", {"request": request, "user": user, "grouped": grouped})
+
+
+@app.get("/admin/users")
+async def admin_users_page(request: Request):
+    return templates.TemplateResponse("admin_users.html", {"request": request})
+
+
+@app.get("/admin/roles")
+async def admin_roles_page(request: Request):
+    return templates.TemplateResponse("admin_roles.html", {"request": request})
+
+
+@app.get("/admin/menus")
+async def admin_menus_page(request: Request):
+    return templates.TemplateResponse("admin_menus.html", {"request": request})
+
+
+@app.get("/admin/audit")
+async def admin_audit_page(request: Request):
+    return templates.TemplateResponse("admin_audit.html", {"request": request})
+
+
+# ---------------- 人员管理 API ----------------
+@app.get("/api/admin/users")
+async def api_users_list(request: Request):
+    return {"ok": True, "users": await db.users_list(), "roles": await db.roles_list()}
+
+
+@app.post("/api/admin/users")
+async def api_users_create(request: Request):
+    p = await request.json()
+    email = str(p.get("email", "")).strip()
+    pwd = str(p.get("password", ""))
+    if not email or len(pwd) < 6:
+        return {"ok": False, "error": "邮箱必填、密码至少 6 位"}
+    if await db.user_by_email(email):
+        return {"ok": False, "error": "邮箱已存在"}
+    uid = await db.user_create(email, auth.hash_password(pwd), str(p.get("display_name", "")), [int(x) for x in (p.get("role_ids") or [])])
+    await db.audit("user_create", user=auth.current_user(request), target=email, ip=request.client.host if request.client else "")
+    return {"ok": True, "id": uid}
+
+
+@app.put("/api/admin/users/{uid}")
+async def api_users_update(uid: int, request: Request):
+    p = await request.json()
+    pwd_hash = auth.hash_password(p["password"]) if p.get("password") else None
+    await db.user_update(
+        uid,
+        display_name=p.get("display_name"),
+        status=p.get("status"),
+        role_ids=[int(x) for x in p["role_ids"]] if p.get("role_ids") is not None else None,
+        password_hash=pwd_hash,
+    )
+    await db.audit("user_update", user=auth.current_user(request), target=str(uid), ip=request.client.host if request.client else "")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{uid}")
+async def api_users_delete(uid: int, request: Request):
+    me = auth.current_user(request)
+    if me and me["id"] == uid:
+        return {"ok": False, "error": "不能删除自己"}
+    await db.user_delete(uid)
+    await db.audit("user_delete", user=me, target=str(uid), ip=request.client.host if request.client else "")
+    return {"ok": True}
+
+
+# ---------------- 角色管理 API ----------------
+@app.get("/api/admin/roles")
+async def api_roles_list(request: Request):
+    return {"ok": True, "roles": await db.roles_list(), "permissions": await db.permissions_list()}
+
+
+@app.post("/api/admin/roles")
+async def api_roles_create(request: Request):
+    p = await request.json()
+    name = str(p.get("name", "")).strip()
+    if not name:
+        return {"ok": False, "error": "角色名必填"}
+    rid = await db.role_create(name, str(p.get("description", "")), list(p.get("perms") or []))
+    await db.audit("role_create", user=auth.current_user(request), target=name, ip=request.client.host if request.client else "")
+    return {"ok": True, "id": rid}
+
+
+@app.put("/api/admin/roles/{rid}")
+async def api_roles_update(rid: int, request: Request):
+    p = await request.json()
+    await db.role_update(rid, name=p.get("name"), description=p.get("description"),
+                         perm_codes=list(p["perms"]) if p.get("perms") is not None else None)
+    await db.audit("role_update", user=auth.current_user(request), target=str(rid), ip=request.client.host if request.client else "")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/roles/{rid}")
+async def api_roles_delete(rid: int, request: Request):
+    try:
+        await db.role_delete(rid)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    await db.audit("role_delete", user=auth.current_user(request), target=str(rid), ip=request.client.host if request.client else "")
+    return {"ok": True}
+
+
+# ---------------- 菜单管理 API ----------------
+@app.get("/api/admin/menus")
+async def api_menus_list(request: Request):
+    return {"ok": True, "menus": await db.menus_list(), "permissions": await db.permissions_list()}
+
+
+@app.post("/api/admin/menus")
+async def api_menus_create(request: Request):
+    p = await request.json()
+    if not str(p.get("title", "")).strip() or not str(p.get("path", "")).strip():
+        return {"ok": False, "error": "标题和路径必填"}
+    await db.menu_create(p["title"].strip(), p["path"].strip(), p.get("perm_code") or None, p.get("grp", ""), int(p.get("sort", 0) or 0))
+    await db.audit("menu_create", user=auth.current_user(request), target=p.get("path", ""), ip=request.client.host if request.client else "")
+    return {"ok": True}
+
+
+@app.put("/api/admin/menus/{mid}")
+async def api_menus_update(mid: int, request: Request):
+    p = await request.json()
+    await db.menu_update(mid, title=p.get("title"), path=p.get("path"), perm_code=p.get("perm_code"),
+                         grp=p.get("grp"), sort=(int(p["sort"]) if p.get("sort") is not None else None),
+                         enabled=p.get("enabled"))
+    await db.audit("menu_update", user=auth.current_user(request), target=str(mid), ip=request.client.host if request.client else "")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/menus/{mid}")
+async def api_menus_delete(mid: int, request: Request):
+    await db.menu_delete(mid)
+    await db.audit("menu_delete", user=auth.current_user(request), target=str(mid), ip=request.client.host if request.client else "")
+    return {"ok": True}
+
+
+# ---------------- 审计日志 API ----------------
+@app.get("/api/admin/audit")
+async def api_audit_list(request: Request):
+    rows = await db.audit_list(300)
+    for r in rows:
+        if r.get("ts"):
+            r["ts"] = r["ts"].isoformat()
+    return {"ok": True, "logs": rows}

@@ -1,14 +1,27 @@
-# sub2report — 多站点 sub2api 用量/财务/运维聚合报表
+# sub2report — 多站点 sub2api 运营平台（带登录/RBAC + 本地 Postgres）
 #
 # 快速启动：
+#   cp .env.example .env && 改一个强密码 S2R_DB_PASSWORD
 #   docker compose up -d --build
-#   打开 http://<host>:5000/settingsites 添加站点（站点名/baseURL/管理员邮箱/密码）
-#   其余页面：/usagerealtime  /financemodel  /opsdingdongding  /usagecnusersearch
+#   打开 http://<host>:5000/  → 登录（默认 nanxb@qq.com / Asd123456）→ 门户
+#   首次登录后请尽快在「人员管理」改密。
 #
-# 站点凭证保存在挂载卷 ./sub2report_data/sites.json（已被 .gitignore 忽略，不入库）。
-# usagecnusersearch 默认使用名称为 "CN" 的站点。
+# 站点凭证、告警配置、人员/角色/权限/菜单/审计都存本地 Postgres(sub2report-db)。
+# 站点配置首次启动会自动从 ./sub2report_data/sites.json（若存在）导入。
 
 services:
+  sub2report-db:
+    image: postgres:16-alpine
+    container_name: sub2report-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: s2r
+      POSTGRES_PASSWORD: ${S2R_DB_PASSWORD:?set S2R_DB_PASSWORD in .env}
+      POSTGRES_DB: sub2report
+      TZ: Asia/Shanghai
+    volumes:
+      - ./sub2report_db_data:/var/lib/postgresql/data
+
   sub2report:
     build:
       context: .
@@ -20,6 +33,10 @@ services:
       - "5000:5000"
     environment:
       SITES_FILE: /data/sites.json
+      ALERTS_FILE: /data/alerts.json
+      S2R_DATABASE_URL: postgresql://s2r:${S2R_DB_PASSWORD}@sub2report-db:5432/sub2report
       TZ: Asia/Shanghai
     volumes:
       - ./sub2report_data:/data
+    depends_on:
+      - sub2report-db

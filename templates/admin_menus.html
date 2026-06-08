@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>菜单管理 · sub2report</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:#f5f7fa;color:#333}
+  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between}
+  .header h1{font-size:18px;font-weight:600}.header a{color:#409eff;text-decoration:none;font-size:13px}
+  .container{max-width:1100px;margin:0 auto;padding:20px}
+  .card{background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{background:#fafafa;color:#606266;text-align:left;padding:8px 10px;border-bottom:2px solid #ebeef5}
+  td{padding:7px 10px;border-bottom:1px solid #f0f2f5}
+  .btn{height:32px;padding:0 14px;border:none;border-radius:6px;font-size:13px;cursor:pointer;background:#409eff;color:#fff}
+  .btn-ghost{background:#fff;color:#606266;border:1px solid #dcdfe6}
+  .btn-del{background:#fff;color:#f56c6c;border:1px solid #fbc4c4;height:28px;padding:0 10px;border-radius:6px;cursor:pointer;font-size:12px}
+  .btn-sm{height:28px;padding:0 10px;border-radius:6px;font-size:12px;cursor:pointer;background:#fff;color:#409eff;border:1px solid #b3d8ff}
+  .fi{display:inline-flex;flex-direction:column;gap:5px;margin:0 12px 12px 0}
+  .fi label{font-size:12px;color:#606266}
+  .fi input,.fi select{height:34px;padding:0 10px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;outline:none}
+  .panel{display:none}.panel.show{display:block}
+  .meta{color:#909399;font-size:12px;margin-left:10px}
+</style>
+</head>
+<body>
+  <div class="header"><h1>菜单管理</h1><div><a href="/portal">← 门户</a> &nbsp; <a href="/logout">退出</a></div></div>
+  <div class="container">
+    <div class="card">
+      <button class="btn" id="addBtn">+ 新增菜单</button>
+      <div class="panel" id="panel" style="margin-top:14px;border-top:1px solid #f0f2f5;padding-top:14px">
+        <input type="hidden" id="f-id">
+        <div class="fi"><label>标题</label><input type="text" id="f-title" style="width:160px"></div>
+        <div class="fi"><label>路径</label><input type="text" id="f-path" style="width:200px"></div>
+        <div class="fi"><label>所需权限</label><select id="f-perm" style="width:200px"></select></div>
+        <div class="fi"><label>分组</label><input type="text" id="f-grp" style="width:100px" placeholder="报表/管理"></div>
+        <div class="fi"><label>排序</label><input type="number" id="f-sort" style="width:80px" value="0"></div>
+        <div class="fi"><label>启用</label><select id="f-enabled" style="width:80px"><option value="true">是</option><option value="false">否</option></select></div>
+        <div><button class="btn" id="saveBtn">保存</button> <button class="btn-ghost" id="cancelBtn">取消</button><span class="meta" id="formMsg"></span></div>
+      </div>
+    </div>
+    <div class="card">
+      <table><thead><tr><th>ID</th><th>标题</th><th>路径</th><th>权限码</th><th>分组</th><th>排序</th><th>启用</th><th>操作</th></tr></thead><tbody id="body"></tbody></table>
+    </div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let PERMS=[];
+async function load(){
+  const d=await(await fetch("/api/admin/menus")).json();
+  PERMS=d.permissions||[];
+  let opts='<option value="">（无需权限）</option>'+PERMS.map(p=>'<option value="'+p.code+'">'+esc(p.name)+' ('+esc(p.code)+')</option>').join("");
+  $("f-perm").innerHTML=opts;
+  const b=$("body");b.innerHTML="";
+  (d.menus||[]).forEach(m=>{
+    const tr=document.createElement("tr");
+    tr.innerHTML='<td>'+m.id+'</td><td>'+esc(m.title)+'</td><td>'+esc(m.path)+'</td><td>'+esc(m.perm_code||"")+'</td><td>'+esc(m.grp||"")+'</td><td>'+m.sort+'</td><td>'+(m.enabled?"是":"否")+'</td>'+
+      '<td><button class="btn-sm" onclick=\'edit('+JSON.stringify(m).replace(/'/g,"&#39;")+')\'>编辑</button> '+
+      '<button class="btn-del" onclick="del('+m.id+')">删除</button></td>';
+    b.appendChild(tr);
+  });
+}
+$("addBtn").onclick=()=>{$("f-id").value="";$("f-title").value="";$("f-path").value="";$("f-perm").value="";$("f-grp").value="报表";$("f-sort").value="0";$("f-enabled").value="true";$("panel").classList.add("show");$("formMsg").textContent="";};
+window.edit=(m)=>{$("f-id").value=m.id;$("f-title").value=m.title;$("f-path").value=m.path;$("f-perm").value=m.perm_code||"";$("f-grp").value=m.grp||"";$("f-sort").value=m.sort;$("f-enabled").value=m.enabled?"true":"false";$("panel").classList.add("show");$("formMsg").textContent="";};
+$("cancelBtn").onclick=()=>$("panel").classList.remove("show");
+$("saveBtn").onclick=async()=>{
+  const id=$("f-id").value;
+  const body={title:$("f-title").value.trim(),path:$("f-path").value.trim(),perm_code:$("f-perm").value||null,grp:$("f-grp").value,sort:+$("f-sort").value,enabled:$("f-enabled").value==="true"};
+  let resp;
+  if(id)resp=await fetch("/api/admin/menus/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  else resp=await fetch("/api/admin/menus",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const d=await resp.json();
+  if(d.ok){$("panel").classList.remove("show");load();}else $("formMsg").textContent=d.error||"保存失败";
+};
+window.del=async(id)=>{if(!confirm("删除该菜单?"))return;const d=await(await fetch("/api/admin/menus/"+id,{method:"DELETE"})).json();if(d.ok)load();else alert(d.error||"删除失败");};
+load();
+</script>
+</body>
+</html>

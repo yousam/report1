@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审计日志 · sub2report</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:#f5f7fa;color:#333}
+  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between}
+  .header h1{font-size:18px;font-weight:600}.header a{color:#409eff;text-decoration:none;font-size:13px}
+  .container{max-width:1300px;margin:0 auto;padding:20px}
+  .card{background:#fff;border-radius:8px;padding:16px 20px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  .actions{margin-bottom:12px}
+  .btn{height:32px;padding:0 14px;border:none;border-radius:6px;font-size:13px;cursor:pointer;background:#409eff;color:#fff}
+  table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+  th{background:#fafafa;color:#606266;text-align:left;padding:8px 10px;border-bottom:2px solid #ebeef5;position:sticky;top:0}
+  td{padding:7px 10px;border-bottom:1px solid #f0f2f5}
+  td.detail{white-space:normal;color:#909399;max-width:420px;word-break:break-all}
+  .a-login{color:#1f9550}.a-fail{color:#f56c6c}.a-del{color:#f56c6c}
+  .muted{color:#c0c4cc}
+</style>
+</head>
+<body>
+  <div class="header"><h1>审计日志</h1><div><a href="/portal">← 门户</a> &nbsp; <a href="/logout">退出</a></div></div>
+  <div class="container">
+    <div class="card">
+      <div class="actions"><button class="btn" id="refresh">刷新</button> <span class="muted" id="meta"></span></div>
+      <table><thead><tr><th>时间</th><th>用户</th><th>动作</th><th>对象</th><th>IP</th><th>详情</th></tr></thead><tbody id="body"></tbody></table>
+    </div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ft=s=>s?String(s).replace("T"," ").replace(/\..*/,"").slice(0,19):"-";
+function acls(a){if(a==="login")return"a-login";if(a==="login_failed")return"a-fail";if(a&&a.indexOf("delete")>=0)return"a-del";return"";}
+async function load(){
+  const d=await(await fetch("/api/admin/audit")).json();
+  const b=$("body");b.innerHTML="";
+  (d.logs||[]).forEach(r=>{
+    const tr=document.createElement("tr");
+    tr.innerHTML='<td>'+ft(r.ts)+'</td><td>'+esc(r.email||"")+'</td><td class="'+acls(r.action)+'">'+esc(r.action)+'</td>'+
+      '<td>'+esc(r.target||"")+'</td><td>'+esc(r.ip||"")+'</td><td class="detail">'+(r.detail?esc(JSON.stringify(r.detail)):'<span class="muted">-</span>')+'</td>';
+    b.appendChild(tr);
+  });
+  $("meta").textContent="共 "+((d.logs||[]).length)+" 条（最近 300）";
+}
+$("refresh").onclick=load;
+load();
+</script>
+</body>
+</html>
