@@ -2060,7 +2060,7 @@ async def api_users_create(request: Request):
     if await db.user_by_email(email):
         return {"ok": False, "error": "邮箱已存在"}
     uid = await db.user_create(email, auth.hash_password(pwd), str(p.get("display_name", "")), [int(x) for x in (p.get("role_ids") or [])])
-    await db.audit("user_create", user=auth.current_user(request), target=email, ip=request.client.host if request.client else "")
+    await db.audit("user_create", user=auth.current_user(request), target=email, ip=auth.client_ip(request))
     return {"ok": True, "id": uid}
 
 
@@ -2075,7 +2075,7 @@ async def api_users_update(uid: int, request: Request):
         role_ids=[int(x) for x in p["role_ids"]] if p.get("role_ids") is not None else None,
         password_hash=pwd_hash,
     )
-    await db.audit("user_update", user=auth.current_user(request), target=str(uid), ip=request.client.host if request.client else "")
+    await db.audit("user_update", user=auth.current_user(request), target=str(uid), ip=auth.client_ip(request))
     return {"ok": True}
 
 
@@ -2085,7 +2085,7 @@ async def api_users_delete(uid: int, request: Request):
     if me and me["id"] == uid:
         return {"ok": False, "error": "不能删除自己"}
     await db.user_delete(uid)
-    await db.audit("user_delete", user=me, target=str(uid), ip=request.client.host if request.client else "")
+    await db.audit("user_delete", user=me, target=str(uid), ip=auth.client_ip(request))
     return {"ok": True}
 
 
@@ -2102,7 +2102,7 @@ async def api_roles_create(request: Request):
     if not name:
         return {"ok": False, "error": "角色名必填"}
     rid = await db.role_create(name, str(p.get("description", "")), list(p.get("perms") or []))
-    await db.audit("role_create", user=auth.current_user(request), target=name, ip=request.client.host if request.client else "")
+    await db.audit("role_create", user=auth.current_user(request), target=name, ip=auth.client_ip(request))
     return {"ok": True, "id": rid}
 
 
@@ -2111,7 +2111,7 @@ async def api_roles_update(rid: int, request: Request):
     p = await request.json()
     await db.role_update(rid, name=p.get("name"), description=p.get("description"),
                          perm_codes=list(p["perms"]) if p.get("perms") is not None else None)
-    await db.audit("role_update", user=auth.current_user(request), target=str(rid), ip=request.client.host if request.client else "")
+    await db.audit("role_update", user=auth.current_user(request), target=str(rid), ip=auth.client_ip(request))
     return {"ok": True}
 
 
@@ -2121,7 +2121,7 @@ async def api_roles_delete(rid: int, request: Request):
         await db.role_delete(rid)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
-    await db.audit("role_delete", user=auth.current_user(request), target=str(rid), ip=request.client.host if request.client else "")
+    await db.audit("role_delete", user=auth.current_user(request), target=str(rid), ip=auth.client_ip(request))
     return {"ok": True}
 
 
@@ -2137,7 +2137,7 @@ async def api_menus_create(request: Request):
     if not str(p.get("title", "")).strip() or not str(p.get("path", "")).strip():
         return {"ok": False, "error": "标题和路径必填"}
     await db.menu_create(p["title"].strip(), p["path"].strip(), p.get("perm_code") or None, p.get("grp", ""), int(p.get("sort", 0) or 0))
-    await db.audit("menu_create", user=auth.current_user(request), target=p.get("path", ""), ip=request.client.host if request.client else "")
+    await db.audit("menu_create", user=auth.current_user(request), target=p.get("path", ""), ip=auth.client_ip(request))
     return {"ok": True}
 
 
@@ -2147,14 +2147,14 @@ async def api_menus_update(mid: int, request: Request):
     await db.menu_update(mid, title=p.get("title"), path=p.get("path"), perm_code=p.get("perm_code"),
                          grp=p.get("grp"), sort=(int(p["sort"]) if p.get("sort") is not None else None),
                          enabled=p.get("enabled"))
-    await db.audit("menu_update", user=auth.current_user(request), target=str(mid), ip=request.client.host if request.client else "")
+    await db.audit("menu_update", user=auth.current_user(request), target=str(mid), ip=auth.client_ip(request))
     return {"ok": True}
 
 
 @app.delete("/api/admin/menus/{mid}")
 async def api_menus_delete(mid: int, request: Request):
     await db.menu_delete(mid)
-    await db.audit("menu_delete", user=auth.current_user(request), target=str(mid), ip=request.client.host if request.client else "")
+    await db.audit("menu_delete", user=auth.current_user(request), target=str(mid), ip=auth.client_ip(request))
     return {"ok": True}
 
 

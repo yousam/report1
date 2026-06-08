@@ -130,6 +130,22 @@ def _no_perm_html() -> str:
             "<p><a href='/portal' style='color:#409eff'>返回门户</a></p></div>")
 
 
+def client_ip(request: Request) -> str:
+    """取真实客户端 IP。sub2report 在 NPM 后面，直接 peer 是网关内网 IP，
+    真实 IP 在转发头里（Cloudflare → CF-Connecting-IP；NPM → X-Real-IP / X-Forwarded-For）。"""
+    h = request.headers
+    for k in ("cf-connecting-ip", "x-real-ip"):
+        v = h.get(k)
+        if v and v.strip():
+            return v.strip()
+    xff = h.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else ""
+
+
 def current_user(request: Request) -> dict | None:
     return getattr(request.state, "user", None)
 
@@ -164,7 +180,7 @@ async def login_submit(request: Request):
     password = str(form.get("password", ""))
     nxt = _safe_next(str(form.get("next", "")))
     user = await db.user_by_email(email)
-    ip = request.client.host if request.client else ""
+    ip = client_ip(request)
     if not user or user["status"] != "active" or not verify_password(password, user["password_hash"]):
         await db.audit("login_failed", user=user or {"email": email}, ip=ip)
         return templates.TemplateResponse("login.html", {"request": request, "error": "邮箱或密码错误", "next": nxt}, status_code=401)
@@ -208,5 +224,5 @@ async def change_pw_submit(request: Request):
     if len(new) < 6:
         return templates.TemplateResponse("change_password.html", {"request": request, "error": "新密码至少 6 位", "ok": False}, status_code=400)
     await db.set_password(user["id"], hash_password(new))
-    await db.audit("change_password", user=user, ip=request.client.host if request.client else "")
+    await db.audit("change_password", user=user, ip=client_ip(request))
     return templates.TemplateResponse("change_password.html", {"request": request, "error": "", "ok": True})
