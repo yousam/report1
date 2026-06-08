@@ -2166,3 +2166,85 @@ async def api_audit_list(request: Request):
         if r.get("ts"):
             r["ts"] = r["ts"].isoformat()
     return {"ok": True, "logs": rows}
+
+
+# ---------------- 代理 IP 监测（只看 bar6 站，读 sub2api 已有的代理健康数据） ----------------
+async def _bar6_site():
+    for s in await db.sites_list():
+        if "bar6" in (s["base_url"] or "").lower():
+            return s
+    return None
+
+
+@app.get("/proxyhealth")
+async def proxyhealth_page(request: Request):
+    return templates.TemplateResponse("proxyhealth.html", {"request": request})
+
+
+@app.get("/api/proxy-health")
+async def api_proxy_health(request: Request):
+    site = await _bar6_site()
+    if not site or not site["base_url"]:
+        return {"ok": False, "error": "未找到 bar6 站点（站点配置里需有 base_url 含 bar6 的站）"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            jwt = await _login(client, site["base_url"], site["email"], site["password"])
+        except Exception as e:
+            return {"ok": False, "error": f"登录失败: {e}"}
+        proxies = await _get_all_pages(client, site["base_url"], jwt, "/api/v1/admin/proxies", {})
+    rows = []
+    for p in proxies:
+        if not isinstance(p, dict):
+            continue
+        status = p.get("status")
+        lat_status = p.get("latency_status")
+        q_status = p.get("quality_status")
+        problem = (status not in ("active", "enabled", None)) \
+            or (lat_status not in ("success", None, "")) \
+            or (q_status in ("fail", "error", "challenge"))
+        rows.append({
+            "id": p.get("id"), "name": p.get("name"), "protocol": p.get("protocol"),
+            "host": p.get("host"), "port": p.get("port"), "status": status,
+            "account_count": _gnum(p.get("account_count")),
+            "latency_ms": p.get("latency_ms"), "latency_status": lat_status,
+            "latency_message": p.get("latency_message"),
+            "ip_address": p.get("ip_address"), "country": p.get("country"), "city": p.get("city"),
+            "quality_status": q_status, "quality_score": p.get("quality_score"),
+            "quality_grade": p.get("quality_grade"), "quality_summary": p.get("quality_summary"),
+            "problem": problem,
+        })
+    rows.sort(key=lambda r: (not r["problem"], -(r["account_count"] or 0)))
+    return {"ok": True, "site": site["name"], "base_url": site["base_url"], "proxies": rows,
+            "count": len(rows), "problem_count": sum(1 for r in rows if r["problem"]),
+            "server_time": datetime.now().isoformat(timespec="seconds")}
+
+
+@app.post("/api/proxy-test")
+async def api_proxy_test(request: Request):
+    """手动触发 bar6 sub2api 对某个代理做一次延迟探测（sub2api 原生 test，轻量）。"""
+    try:
+        p = await request.json()
+    except Exception:
+        return {"ok": False, "error": "请求体必须是 JSON"}
+    pid = p.get("id")
+    if not pid:
+        return {"ok": False, "error": "缺少代理 id"}
+    site = await _bar6_site()
+    if not site or not site["base_url"]:
+        return {"ok": False, "error": "未找到 bar6 站点"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            jwt = await _login(client, site["base_url"], site["email"], site["password"])
+        except Exception as e:
+            return {"ok": False, "error": f"登录失败: {e}"}
+        try:
+            resp = await client.post(
+                f"{site['base_url']}/api/v1/admin/proxies/{int(pid)}/test",
+                headers={"Authorization": f"Bearer {jwt}"}, timeout=30,
+            )
+            body = resp.json()
+            data = body.get("data", body) if isinstance(body, dict) else {}
+        except Exception as e:
+            return {"ok": False, "error": f"测试失败: {e}"}
+    await db.audit("proxy_test", user=auth.current_user(request), target=f"bar6/proxy/{pid}", ip=auth.client_ip(request))
+    return {"ok": True, "result": data if isinstance(data, dict) else {}}

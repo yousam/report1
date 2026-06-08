@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>代理IP监测 · bar6</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:#f5f7fa;color:#333}
+  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center}
+  .header h1{font-size:18px;font-weight:600}
+  .container{max-width:1600px;margin:0 auto;padding:20px}
+  .card{background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+  .actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .btn{height:34px;padding:0 18px;border:none;border-radius:6px;font-size:13px;cursor:pointer;background:#409eff;color:#fff}
+  .btn:disabled{background:#a0cfff}
+  .btn-sm{height:28px;padding:0 10px;border-radius:6px;font-size:12px;cursor:pointer;background:#fff;color:#409eff;border:1px solid #b3d8ff}
+  .meta{color:#909399;font-size:12px}
+  .err{color:#f56c6c;font-size:13px;margin-top:8px;display:none}
+  .result-wrap{overflow-x:auto}
+  table.t{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+  table.t th{background:#fafafa;color:#606266;font-weight:600;padding:8px 10px;text-align:left;border-bottom:2px solid #ebeef5}
+  table.t td{padding:7px 10px;text-align:left;border-bottom:1px solid #f0f2f5}
+  table.t tr.bad td{background:#fef6f6}
+  .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600}
+  .ok{background:#e7f7ee;color:#1f9550}.bad{background:#fef0f0;color:#f56c6c}.warn{background:#fdf6ec;color:#e6a23c}
+  .lat-good{color:#1f9550;font-weight:600}.lat-bad{color:#f56c6c;font-weight:600}.muted{color:#c0c4cc}
+  .chip{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;background:#f0f2f5;color:#606266;margin-right:8px}
+  .chip.g{background:#e7f7ee;color:#1f9550}.chip.r{background:#fef0f0;color:#f56c6c}
+</style>
+</head>
+<body>
+  <div class="header"><h1>代理IP监测（bar6）</h1></div>
+  <div class="container">
+    <div class="card">
+      <div class="actions">
+        <button class="btn" id="refresh">刷新</button>
+        <span id="summary"></span>
+        <span class="meta" id="meta"></span>
+      </div>
+      <div class="meta" style="margin-top:6px">数据来自 bar6 sub2api 自身的代理检测结果（延迟/质量/地理位置），本页只读。「重测延迟」会让 sub2api 对该代理做一次原生探测。</div>
+      <div class="err" id="err"></div>
+    </div>
+    <div class="card">
+      <div class="result-wrap">
+        <table class="t">
+          <thead><tr>
+            <th>代理名</th><th>协议</th><th>主机:端口</th><th>出口IP</th><th>地区</th>
+            <th>状态</th><th>延迟</th><th>质量</th><th>账号数</th><th>操作</th>
+          </tr></thead>
+          <tbody id="body"><tr><td class="muted" colspan="10">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let busy=false;
+
+function statusBadge(s){
+  if(s==="active"||s==="enabled")return '<span class="badge ok">'+esc(s)+'</span>';
+  if(!s)return '<span class="muted">-</span>';
+  return '<span class="badge bad">'+esc(s)+'</span>';
+}
+function latCell(p){
+  if(p.latency_status==="success"){
+    const ms=p.latency_ms;
+    const cls=ms!=null&&ms>800?'lat-bad':'lat-good';
+    return '<span class="'+cls+'">'+(ms!=null?ms+'ms':'ok')+'</span>';
+  }
+  if(!p.latency_status)return '<span class="muted">-</span>';
+  return '<span class="badge bad" title="'+esc(p.latency_message||"")+'">'+esc(p.latency_status)+'</span>';
+}
+function qualCell(p){
+  if(p.quality_grade==null&&p.quality_status==null)return '<span class="muted">-</span>';
+  let cls='ok';
+  if(p.quality_status==="warn")cls='warn';
+  else if(["fail","error","challenge"].includes(p.quality_status))cls='bad';
+  const g=p.quality_grade?(' '+esc(p.quality_grade)):'';
+  const sc=p.quality_score!=null?(' '+p.quality_score):'';
+  return '<span class="badge '+cls+'" title="'+esc(p.quality_summary||"")+'">'+esc(p.quality_status||"")+g+sc+'</span>';
+}
+async function load(){
+  if(busy)return;busy=true;
+  const err=$("err");err.style.display="none";
+  const btn=$("refresh");btn.disabled=true;btn.textContent="刷新中…";
+  try{
+    const d=await(await fetch("/api/proxy-health")).json();
+    if(!d.ok){err.textContent=d.error||"加载失败";err.style.display="block";$("body").innerHTML='<tr><td class="muted" colspan="10">-</td></tr>';return;}
+    const ps=d.proxies||[];
+    $("summary").innerHTML='<span class="chip">共 '+d.count+' 个代理</span>'+
+      (d.problem_count>0?'<span class="chip r">异常 '+d.problem_count+'</span>':'<span class="chip g">全部正常</span>');
+    const b=$("body");b.innerHTML="";
+    if(!ps.length){b.innerHTML='<tr><td class="muted" colspan="10">无代理</td></tr>';}
+    ps.forEach(p=>{
+      const tr=document.createElement("tr");if(p.problem)tr.className="bad";
+      const geo=[p.country,p.city].filter(Boolean).join(" ");
+      tr.innerHTML='<td><b>'+esc(p.name)+'</b></td>'+
+        '<td>'+esc(p.protocol)+'</td>'+
+        '<td>'+esc(p.host)+':'+esc(p.port)+'</td>'+
+        '<td>'+esc(p.ip_address||"")+'</td>'+
+        '<td>'+esc(geo||"-")+'</td>'+
+        '<td>'+statusBadge(p.status)+'</td>'+
+        '<td>'+latCell(p)+'</td>'+
+        '<td>'+qualCell(p)+'</td>'+
+        '<td>'+(p.account_count||0)+'</td>'+
+        '<td><button class="btn-sm" onclick="test('+p.id+',this)">重测延迟</button></td>';
+      b.appendChild(tr);
+    });
+    $("meta").textContent="更新于 "+(d.server_time||"").replace("T"," ")+" · 站点 "+esc(d.site);
+  }catch(e){err.textContent="请求失败: "+e;err.style.display="block";}
+  finally{busy=false;btn.disabled=false;btn.textContent="刷新";}
+}
+window.test=async(id,el)=>{
+  el.disabled=true;el.textContent="测试中…";
+  try{
+    const d=await(await fetch("/api/proxy-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})})).json();
+    if(!d.ok)alert(d.error||"测试失败");
+  }catch(e){alert("请求失败: "+e);}
+  await load();
+};
+$("refresh").onclick=load;
+load();
+</script>
+</body>
+</html>

@@ -57,6 +57,8 @@ _API_PERMS = {
     ("POST", "/api/usage-cn-recharge"): "page.usagecnusersearch",
     ("POST", "/api/station-kpi"): "page.stationkpi",
     ("POST", "/api/account-health"): "page.accounthealth",
+    ("GET", "/api/proxy-health"): "page.proxyhealth",
+    ("POST", "/api/proxy-test"): "page.proxyhealth",
     ("POST", "/api/user-economy"): "page.usereconomy",
     ("POST", "/api/revenue"): "page.revenuereport",
     ("POST", "/api/model-profit"): "page.modelprofit",

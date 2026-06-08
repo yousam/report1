@@ -26,6 +26,7 @@ MENUS_SEED = [
     ("page.usagecnusersearch", "CN用量/充值查询", "/usagecnusersearch", "报表", 40),
     ("page.stationkpi", "跨站每日KPI", "/stationkpi", "报表", 50),
     ("page.accounthealth", "上游账号健康", "/accounthealth", "报表", 60),
+    ("page.proxyhealth", "代理IP监测(bar6)", "/proxyhealth", "报表", 65),
     ("page.usereconomy", "用户经济看板", "/usereconomy", "报表", 70),
     ("page.revenuereport", "充值/收入报表", "/revenuereport", "报表", 80),
     ("page.modelprofit", "模型利润分解", "/modelprofit", "报表", 90),
