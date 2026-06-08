@@ -3,46 +3,82 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>门户 · sub2report</title>
+<title>tokenfor.me 运营平台</title>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:#f5f7fa;color:#333;min-height:100vh}
-  .header{background:#fff;border-bottom:1px solid #e4e7ed;padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between}
-  .header h1{font-size:18px;font-weight:600;color:#1a1a1a}
-  .header .right{font-size:13px;color:#606266;display:flex;align-items:center;gap:14px}
-  .header a{color:#409eff;text-decoration:none}
-  .container{max-width:1200px;margin:0 auto;padding:24px}
-  .group{margin-bottom:26px}
-  .group h2{font-size:14px;color:#909399;font-weight:600;margin-bottom:12px;letter-spacing:.5px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
-  .tile{display:block;background:#fff;border:1px solid #ebeef5;border-radius:10px;padding:18px 18px;text-decoration:none;color:#1a1a1a;box-shadow:0 1px 4px rgba(0,0,0,.05);transition:all .15s}
-  .tile:hover{border-color:#409eff;box-shadow:0 4px 16px rgba(64,158,255,.15);transform:translateY(-1px)}
-  .tile .t{font-size:15px;font-weight:600}
-  .tile .p{font-size:12px;color:#909399;margin-top:6px}
-  .empty{color:#c0c4cc;font-size:14px}
+  html,body{height:100%}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:#f5f7fa;color:#333;overflow:hidden}
+  .layout{display:flex;height:100vh}
+  /* 左侧菜单 */
+  .sidebar{width:230px;flex:0 0 230px;background:#304156;color:#bfcbd9;display:flex;flex-direction:column;height:100vh}
+  .brand{height:56px;display:flex;align-items:center;padding:0 18px;font-size:15px;font-weight:700;color:#fff;background:#2b3a4d;letter-spacing:.3px}
+  .brand .dot{width:8px;height:8px;border-radius:50%;background:#409eff;margin-right:9px}
+  .nav{flex:1;overflow-y:auto;padding:8px 0}
+  .grp-title{font-size:11px;color:#8492a6;padding:14px 18px 6px;letter-spacing:1px}
+  .menu-item{display:block;padding:11px 18px;color:#bfcbd9;text-decoration:none;font-size:14px;border-left:3px solid transparent;transition:all .15s;cursor:pointer}
+  .menu-item:hover{background:#263445;color:#fff}
+  .menu-item.active{background:#263445;color:#fff;border-left-color:#409eff}
+  .userbox{border-top:1px solid #3a4d63;padding:12px 18px;font-size:12px;color:#8492a6}
+  .userbox .name{color:#e6e9ee;font-size:13px;margin-bottom:6px;word-break:break-all}
+  .userbox a{color:#409eff;text-decoration:none;margin-right:12px}
+  /* 右侧内容 */
+  .content{flex:1;height:100vh;background:#f5f7fa}
+  iframe{width:100%;height:100%;border:0;display:block}
+  .empty{display:flex;align-items:center;justify-content:center;height:100%;color:#c0c4cc;font-size:15px}
 </style>
 </head>
 <body>
-  <div class="header">
-    <h1>sub2report 运营平台</h1>
-    <div class="right">
-      <span>{{ user.display_name or user.email }}</span>
-      <a href="/change-password">改密</a>
-      <a href="/logout">退出</a>
-    </div>
-  </div>
-  <div class="container">
-    {% if not grouped %}<div class="empty">你的角色暂无任何可访问的菜单，请联系管理员分配权限。</div>{% endif %}
-    {% for grp, items in grouped %}
-    <div class="group">
-      <h2>{{ grp }}</h2>
-      <div class="grid">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand"><span class="dot"></span>tokenfor.me 运营平台</div>
+      <nav class="nav" id="nav">
+        {% for grp, items in grouped %}
+        <div class="grp-title">{{ grp }}</div>
         {% for m in items %}
-        <a class="tile" href="{{ m.path }}"><div class="t">{{ m.title }}</div><div class="p">{{ m.path }}</div></a>
+        <a class="menu-item" data-path="{{ m.path }}" href="#{{ m.path }}">{{ m.title }}</a>
         {% endfor %}
+        {% endfor %}
+        {% if not grouped %}<div class="grp-title">无可用菜单，请联系管理员分配权限</div>{% endif %}
+      </nav>
+      <div class="userbox">
+        <div class="name">{{ user.display_name or user.email }}</div>
+        <a href="/change-password" target="_blank">改密</a><a href="/logout">退出</a>
       </div>
-    </div>
-    {% endfor %}
+    </aside>
+    <main class="content">
+      <iframe id="frame" name="content"></iframe>
+      <div class="empty" id="empty" style="display:none">从左侧选择一个功能</div>
+    </main>
   </div>
+<script>
+  const items=[...document.querySelectorAll(".menu-item")];
+  const frame=document.getElementById("frame");
+  const empty=document.getElementById("empty");
+  const paths=items.map(a=>a.dataset.path);
+
+  function activate(path){
+    let matched=false;
+    items.forEach(a=>{
+      const on=a.dataset.path===path;
+      a.classList.toggle("active",on);
+      if(on)matched=true;
+    });
+    if(matched){
+      empty.style.display="none";frame.style.display="block";
+      // 仅当目标变化时才刷新，避免重复 reload
+      try{ if(frame.contentWindow.location.pathname!==path) frame.src=path; }
+      catch(e){ frame.src=path; }
+    }
+  }
+  function fromHash(){
+    const h=decodeURIComponent(location.hash.replace(/^#/,""));
+    if(h && paths.includes(h.split("?")[0])){ activate(h.split("?")[0]); frame.src=h; return; }
+    if(paths.length){ location.hash="#"+paths[0]; }
+    else { frame.style.display="none"; empty.style.display="flex"; }
+  }
+  window.addEventListener("hashchange",fromHash);
+  items.forEach(a=>a.addEventListener("click",()=>{ /* href=#path 触发 hashchange */ }));
+  fromHash();
+</script>
 </body>
 </html>

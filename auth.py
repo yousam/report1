@@ -10,6 +10,7 @@ import os
 import secrets
 
 from fastapi import APIRouter, Request
+from urllib.parse import quote
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -44,9 +45,21 @@ PUBLIC_PREFIXES = ("/login", "/logout", "/favicon", "/health")
 # 页面路径 → 权限码
 _PAGE_PERMS = {path: code for code, _t, path, _g, _s in db.MENUS_SEED}
 
-# 敏感 API → 权限码（其余 /api/* 仅需登录）
+# API → 权限码（与所属页面同权限）。GET /api/sites 例外：各页下拉共用，仅需登录。
 _API_PERMS = {
     ("POST", "/api/sites"): "page.settingsites",
+    ("POST", "/api/site-test"): "page.settingsites",
+    ("POST", "/api/report"): "page.usagerealtime",
+    ("POST", "/api/finance"): "page.financemodel",
+    ("POST", "/api/ops-aggregate"): "page.opsdingdongding",
+    ("POST", "/api/ops-detail"): "page.opsdingdongding",
+    ("POST", "/api/usage-cn-search"): "page.usagecnusersearch",
+    ("POST", "/api/usage-cn-recharge"): "page.usagecnusersearch",
+    ("POST", "/api/station-kpi"): "page.stationkpi",
+    ("POST", "/api/account-health"): "page.accounthealth",
+    ("POST", "/api/user-economy"): "page.usereconomy",
+    ("POST", "/api/revenue"): "page.revenuereport",
+    ("POST", "/api/model-profit"): "page.modelprofit",
     ("POST", "/api/alert-config"): "page.alertpush",
     ("GET", "/api/alert-config"): "page.alertpush",
     ("POST", "/api/alert-test"): "page.alertpush",
@@ -93,7 +106,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not user:
             if is_api:
                 return JSONResponse({"ok": False, "error": "未登录", "auth": False}, status_code=401)
-            return RedirectResponse(url="/login", status_code=302)
+            nxt = path
+            if request.url.query:
+                nxt = f"{path}?{request.url.query}"
+            return RedirectResponse(url=f"/login?next={quote(nxt, safe='')}", status_code=302)
 
         # 强制改密（默认管理员 must_change_pwd=False，不触发）
         if user.get("must_change_pwd") and path not in ("/change-password",) and not is_api:
@@ -125,11 +141,20 @@ def has_perm(request: Request, code: str) -> bool:
 router = APIRouter()
 
 
+def _safe_next(n: str) -> str:
+    """只允许站内相对路径，防开放重定向。"""
+    n = (n or "").strip()
+    if n.startswith("/") and not n.startswith("//"):
+        return n
+    return ""
+
+
 @router.get("/login")
 async def login_page(request: Request):
+    nxt = _safe_next(request.query_params.get("next", ""))
     if current_user(request):
-        return RedirectResponse(url="/portal", status_code=302)
-    return templates.TemplateResponse("login.html", {"request": request, "error": ""})
+        return RedirectResponse(url=nxt or "/portal", status_code=302)
+    return templates.TemplateResponse("login.html", {"request": request, "error": "", "next": nxt})
 
 
 @router.post("/login")
@@ -137,16 +162,17 @@ async def login_submit(request: Request):
     form = await request.form()
     email = str(form.get("email", "")).strip()
     password = str(form.get("password", ""))
+    nxt = _safe_next(str(form.get("next", "")))
     user = await db.user_by_email(email)
     ip = request.client.host if request.client else ""
     if not user or user["status"] != "active" or not verify_password(password, user["password_hash"]):
         await db.audit("login_failed", user=user or {"email": email}, ip=ip)
-        return templates.TemplateResponse("login.html", {"request": request, "error": "邮箱或密码错误"}, status_code=401)
+        return templates.TemplateResponse("login.html", {"request": request, "error": "邮箱或密码错误", "next": nxt}, status_code=401)
     token = secrets.token_urlsafe(32)
     await db.session_create(token, user["id"], ip, request.headers.get("user-agent", "")[:300])
     await db.touch_login(user["id"])
     await db.audit("login", user=user, ip=ip)
-    dest = "/change-password" if user.get("must_change_pwd") else "/portal"
+    dest = "/change-password" if user.get("must_change_pwd") else (nxt or "/portal")
     resp = RedirectResponse(url=dest, status_code=302)
     resp.set_cookie(COOKIE, token, httponly=True, samesite="lax", secure=SECURE_COOKIE, max_age=7 * 86400, path="/")
     return resp

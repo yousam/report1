@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>登录 · sub2report</title>
+<title>登录 · tokenfor.me 运营平台</title>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:#f5f7fa;min-height:100vh;display:flex;align-items:center;justify-content:center}
@@ -20,8 +20,9 @@
 </head>
 <body>
   <form class="box" method="post" action="/login">
-    <h1>sub2report</h1>
-    <div class="sub">聚合运营平台 · 请登录</div>
+    <h1>tokenfor.me 运营平台</h1>
+    <div class="sub">请登录</div>
+    <input type="hidden" name="next" value="{{ next }}">
     <label>邮箱</label>
     <input type="email" name="email" autocomplete="username" autofocus required>
     <label>密码</label>
